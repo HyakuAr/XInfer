@@ -1,0 +1,99 @@
+# ====================================================================
+# Build & Output Directories
+# ====================================================================
+build/
+build_*/
+cmake-build-*/
+out/
+bin/
+
+# ====================================================================
+# CMake & Ninja Build Artifacts
+# ====================================================================
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+Testing/
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+.ninja_deps
+.ninja_log
+build.ninja
+
+# ====================================================================
+# C / C++ Compiled Binaries, Objects & Debug Symbols
+# ====================================================================
+*.obj
+*.o
+*.lib
+*.a
+*.dll
+*.so
+*.dylib
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.idb
+
+# ====================================================================
+# Model Weights, Checkpoints & Engine Artifacts
+# ====================================================================
+# Keep actual large weights, model dumps, and generated .xinfer files untracked
+*.xinfer
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+models/
+weights/
+checkpoints/
+
+# ====================================================================
+# Python & Virtual Environments (Offline converter / parity tools)
+# ====================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+*.egg-info/
+dist/
+
+# ====================================================================
+# IDE & Editor Configurations
+# ====================================================================
+.vs/
+.vscode/
+.idea/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# ====================================================================
+# Intel Tooling, Profiling & Crash Dumps
+# ====================================================================
+*.amplxe/
+*.advixe/
+*.vtune/
+advisor/
+vtune/
+*.dmp
+*.log
+
+# ====================================================================
+# OS & System Artifacts
+# ====================================================================
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
