@@ -115,10 +115,20 @@ All unit tests pass on the real Intel Arc Pro B60 GPU.
 
 ---
 
-## M4 — Naive Correctness Kernels (no XMX yet)
+## M4 — Naive Correctness Kernels (no XMX yet) ✅ DONE
 
 **Goal:** straightforward, unoptimized SYCL kernels for every op the model
 needs, correct before fast.
+
+**Result:** implemented naive, correct SYCL kernels in `src/ops/`:
+- `rmsnorm`: standard and residual-fused RMSNorm.
+- `rope`: rotary position embedding for Q (`H_q = 24`) and K (`H_kv = 4`) heads with `theta = 10,000,000`.
+- `elementwise`: SwiGLU activation (`SiLU(gate) * up`), SiLU, elementwise add, inplace add, and mul.
+- `softmax`: numerically stable row-wise softmax and causal masked softmax.
+- `linear`: naive FP32 GEMM/linear and INT4 dequantizing linear projection matching the M2 artifact layout.
+- `attention`: single-sequence causal Scaled Dot-Product Attention with GQA and online softmax.
+- `sampling`: greedy argmax token selection with workgroup tree reduction in SLM.
+All 7 ops passed independent FP32 numerical oracle tests on the Intel Arc Pro B60 at realistic Qwen3.8-27B shapes.
 
 **Steps:**
 1. Implement naive GEMM/linear (no Joint Matrix / XMX).
@@ -130,9 +140,9 @@ needs, correct before fast.
    per `AGENTS.md` §7, run at realistic Qwen3.8-27B shapes.
 
 **DoD:**
-- [ ] Every op needed for one forward pass exists in `src/ops/`, naive only.
-- [ ] Each op has a passing oracle-comparison test.
-- [ ] No performance tuning yet — correctness only.
+- [x] Every op needed for one forward pass exists in `src/ops/`, naive only.
+- [x] Each op has a passing oracle-comparison test.
+- [x] No performance tuning yet — correctness only.
 
 ---
 
