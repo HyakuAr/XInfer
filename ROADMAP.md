@@ -84,10 +84,17 @@ and section alignment verified by `verify_artifact`.
 
 ---
 
-## M3 — Core Device Layer (SYCL / Level Zero primitives)
+## M3 — Core Device Layer (SYCL / Level Zero primitives) ✅ DONE
 
 **Goal:** the reusable device building blocks every kernel and the engine
 will sit on top of — still no model math.
+
+**Result:** implemented reusable SYCL / Level Zero primitives in `src/core/`:
+- `DeviceContext`: B60 discovery, runtime architecture querying (20 Xe-cores, 160 VE, 1280 threads, 24 GB VRAM, 128 KB SLM), in-order SYCL queue, USM allocators.
+- `TensorShape`, `TensorView`, `DeviceTensor`: USM device memory abstraction, contiguous stride calculation, slicing, and reshaping.
+- `DeviceArena`: 64-byte aligned linear bump allocator for decode-step activation reuse without USM reallocation.
+- `LevelZeroCommandList`: regular deferred command list wrapper for recording, execution, synchronization, and replay on Level Zero.
+All unit tests pass on the real Intel Arc Pro B60 GPU.
 
 **Steps:**
 1. Wrap SYCL queue/context/device selection (reuse the Level Zero device
@@ -102,9 +109,9 @@ will sit on top of — still no model math.
    correct values and no leaks across repeated allocate/free cycles.
 
 **DoD:**
-- [ ] `src/core/` contains tensor/view, arena, and command-list wrapper.
-- [ ] Unit tests pass on the real B60 device.
-- [ ] No model-specific code in `src/core/`.
+- [x] `src/core/` contains tensor/view, arena, and command-list wrapper.
+- [x] Unit tests pass on the real B60 device.
+- [x] No model-specific code in `src/core/`.
 
 ---
 

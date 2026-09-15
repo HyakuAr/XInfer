@@ -48,5 +48,28 @@ target_link_libraries(verify_artifact PRIVATE
     xinfer_artifact
 )
 
+# Milestone 3: Core device layer (SYCL / Level Zero primitives)
+add_library(xinfer_core STATIC
+    src/core/device.cpp
+    src/core/tensor.cpp
+    src/core/arena.cpp
+    src/core/command_list.cpp
+)
+target_include_directories(xinfer_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_compile_options(xinfer_core PUBLIC -fsycl)
+target_link_options(xinfer_core PUBLIC -fsycl)
+
+add_executable(test_core_device
+    tests/test_core_device.cpp
+)
+target_link_libraries(test_core_device PRIVATE
+    xinfer_core
+)
+target_compile_options(test_core_device PRIVATE -fsycl)
+target_link_options(test_core_device PRIVATE -fsycl)
+
 enable_testing()
 add_test(NAME ArtifactRoundTrip COMMAND test_artifact_roundtrip)
+add_test(NAME CoreDeviceTest COMMAND test_core_device)
