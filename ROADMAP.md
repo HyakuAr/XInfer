@@ -53,11 +53,16 @@ Round-trip test passes byte-exact payload verification and corruption/truncation
 
 ---
 
-## M2 — Model Conversion: HF Qwen3.8-27B → `.xinfer` (INT4 weights)
+## M2 — Model Conversion: HF Qwen3.8-27B → `.xinfer` (INT4 weights) ✅ DONE
 
 **Goal:** produce a real `.xinfer` artifact from the official BF16 checkpoint,
 with INT4-quantized weights, verified numerically — still no runtime
 execution yet.
+
+**Result:** offline converter implemented in `tools/convert/qwen3_8_27b/convert.py`
+with symmetric INT4 (group size 128) quantization. Produced `out/qwen3_8_27b.xinfer`
+(15.77 GB, 1,732 sections). All 22 oracle parity checks passed. Full file CRC-64
+and section alignment verified by `verify_artifact`.
 
 **Steps:**
 1. Load the official `Qwen/Qwen3.8-27B` BF16 weights (path supplied by the
@@ -72,10 +77,10 @@ execution yet.
    `AGENTS.md` §7).
 
 **DoD:**
-- [ ] Converter script/tool in `tools/convert/qwen3_8_27b/`.
-- [ ] A real `.xinfer` file exists for Qwen3.8-27B.
-- [ ] Dequantization parity check passes within tolerance, results recorded.
-- [ ] File size and section layout match the container spec from M1.
+- [x] Converter script/tool in `tools/convert/qwen3_8_27b/`.
+- [x] A real `.xinfer` file exists for Qwen3.8-27B.
+- [x] Dequantization parity check passes within tolerance, results recorded.
+- [x] File size and section layout match the container spec from M1.
 
 ---
 

@@ -74,19 +74,19 @@ All multi-byte numeric values are stored in little-endian byte order. Structs ar
 | `0x18` | `uint64_t` | `metadata_offset` | Absolute file offset to metadata JSON block |
 | `0x20` | `uint64_t` | `metadata_size` | Byte length of metadata JSON block |
 | `0x28` | `uint64_t` | `section_table_offset`| Absolute file offset to Section Table |
-| `0x30` | `uint64_t` | `section_table_size` | Byte length of Section Table (`section_count * 96`) |
+| `0x30` | `uint64_t` | `section_table_size` | Byte length of Section Table (`section_count * 128`) |
 | `0x38` | `uint64_t` | `total_file_size` | Total file size in bytes, including `FileFooter` |
 
-### 3.2 SectionEntry (96 bytes)
+### 3.2 SectionEntry (128 bytes)
 
 | Offset | Type | Field | Description |
 |---|---|---|---|
-| `0x00` | `char[64]` | `name` | Null-terminated section identifier (e.g. `model.layers.0.mlp.gate_up_proj.weight`) |
-| `0x40` | `uint32_t` | `type_tag` | Tag identifying payload type (see Section Types) |
-| `0x44` | `uint32_t` | `flags` | Alignment or compression flags |
-| `0x48` | `uint64_t` | `offset` | Absolute file offset to payload (guaranteed 64-byte aligned) |
-| `0x50` | `uint64_t` | `size` | Exact byte length of payload |
-| `0x58` | `uint64_t` | `checksum` | CRC-64/ECMA-182 checksum of payload bytes |
+| `0x00` | `char[96]` | `name` | Null-terminated section identifier (e.g. `model.layers.0.mlp.gate_up_proj.weight`) |
+| `0x60` | `uint32_t` | `type_tag` | Tag identifying payload type (see Section Types) |
+| `0x64` | `uint32_t` | `flags` | Alignment or compression flags |
+| `0x68` | `uint64_t` | `offset` | Absolute file offset to payload (guaranteed 64-byte aligned) |
+| `0x70` | `uint64_t` | `size` | Exact byte length of payload |
+| `0x78` | `uint64_t` | `checksum` | CRC-64/ECMA-182 checksum of payload bytes |
 
 ### 3.3 FileFooter (16 bytes)
 

@@ -1,0 +1,300 @@
+{
+  "model_name": "Qwen/Qwen3.8-27B",
+  "quant_scheme": "INT4-G128-SYM",
+  "total_tensors_in_source": 1199,
+  "linear_tensors_quantized": 531,
+  "artifact_total_sections": 1732,
+  "artifact_size_bytes": 16937573456,
+  "artifact_size_gb": 15.774,
+  "conversion_time_seconds": 404.41,
+  "parity_samples_verified": 22,
+  "all_parity_checks_passed": true,
+  "samples": [
+    {
+      "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_a.weight",
+      "shape": [
+        48,
+        5120
+      ],
+      "group_size": 128,
+      "max_error": 0.01171875,
+      "theoretical_max_bound": 0.01181875,
+      "mean_error": 0.0019375173142179847,
+      "cosine_similarity": 0.9931277632713318,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_b.weight",
+      "shape": [
+        48,
+        5120
+      ],
+      "group_size": 128,
+      "max_error": 0.0042724609375,
+      "theoretical_max_bound": 0.0043724609375,
+      "mean_error": 0.0009953243425115943,
+      "cosine_similarity": 0.9930148720741272,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+      "shape": [
+        10240,
+        5120
+      ],
+      "group_size": 128,
+      "max_error": 0.0307268425822258,
+      "theoretical_max_bound": 0.0312104916036129,
+      "mean_error": 0.0015527285868301988,
+      "cosine_similarity": 1.0024387836456299,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.0.linear_attn.in_proj_z.weight",
+      "shape": [
+        6144,
+        5120
+      ],
+      "group_size": 128,
+      "max_error": 0.0169677734375,
+      "theoretical_max_bound": 0.01712008955180645,
+      "mean_error": 0.001646993332542479,
+      "cosine_similarity": 0.9927787780761719,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.0.linear_attn.out_proj.weight",
+      "shape": [
+        5120,
+        6144
+      ],
+      "group_size": 128,
+      "max_error": 0.0964006632566452,
+      "theoretical_max_bound": 0.0966401753783226,
+      "mean_error": 0.0015627497341483831,
+      "cosine_similarity": 0.9930739402770996,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.0.mlp.down_proj.weight",
+      "shape": [
+        5120,
+        17408
+      ],
+      "group_size": 128,
+      "max_error": 0.0698939710855484,
+      "theoretical_max_bound": 0.0701334832072258,
+      "mean_error": 0.0010730854701250792,
+      "cosine_similarity": 1.014393925666809,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.0.mlp.gate_proj.weight",
+      "shape": [
+        17408,
+        5120
+      ],
+      "group_size": 128,
+      "max_error": 0.0301164910197258,
+      "theoretical_max_bound": 0.0302339291036129,
+      "mean_error": 0.0010250939521938562,
+      "cosine_similarity": 1.0150861740112305,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.0.mlp.up_proj.weight",
+      "shape": [
+        17408,
+        5120
+      ],
+      "group_size": 128,
+      "max_error": 0.0114571712911129,
+      "theoretical_max_bound": 0.01174899580180645,
+      "mean_error": 0.0009890253422781825,
+      "cosine_similarity": 1.0129592418670654,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_a.weight",
+      "shape": [
+        48,
+        5120
+      ],
+      "group_size": 128,
+      "max_error": 0.0160086490213871,
+      "theoretical_max_bound": 0.01614352705180645,
+      "mean_error": 0.0027411705814301968,
+      "cosine_similarity": 0.9905526638031006,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_b.weight",
+      "shape": [
+        48,
+        5120
+      ],
+      "group_size": 128,
+      "max_error": 0.01953125,
+      "theoretical_max_bound": 0.01963125,
+      "mean_error": 0.002375944284722209,
+      "cosine_similarity": 0.9898712635040283,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_qkv.weight",
+      "shape": [
+        10240,
+        5120
+      ],
+      "group_size": 128,
+      "max_error": 0.0238037109375,
+      "theoretical_max_bound": 0.02395602705180645,
+      "mean_error": 0.0015828876057639718,
+      "cosine_similarity": 1.002209186553955,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.linear_attn.in_proj_z.weight",
+      "shape": [
+        6144,
+        5120
+      ],
+      "group_size": 128,
+      "max_error": 0.0187813900411129,
+      "theoretical_max_bound": 0.01907321455180645,
+      "mean_error": 0.0015949402004480362,
+      "cosine_similarity": 0.9924018383026123,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.linear_attn.out_proj.weight",
+      "shape": [
+        5120,
+        6144
+      ],
+      "group_size": 128,
+      "max_error": 0.103515625,
+      "theoretical_max_bound": 0.10556875,
+      "mean_error": 0.0016035441076382995,
+      "cosine_similarity": 0.992762565612793,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.mlp.down_proj.weight",
+      "shape": [
+        5120,
+        17408
+      ],
+      "group_size": 128,
+      "max_error": 0.03125,
+      "theoretical_max_bound": 0.0316290167927742,
+      "mean_error": 0.0011101552518084645,
+      "cosine_similarity": 1.0138300657272339,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.mlp.gate_proj.weight",
+      "shape": [
+        17408,
+        5120
+      ],
+      "group_size": 128,
+      "max_error": 0.01373291015625,
+      "theoretical_max_bound": 0.01663180830180645,
+      "mean_error": 0.0010756122646853328,
+      "cosine_similarity": 1.015511393547058,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.1.mlp.up_proj.weight",
+      "shape": [
+        17408,
+        5120
+      ],
+      "group_size": 128,
+      "max_error": 0.01523263193666935,
+      "theoretical_max_bound": 0.015376228077709674,
+      "mean_error": 0.0010524006793275476,
+      "cosine_similarity": 1.0156010389328003,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.10.mlp.down_proj.weight",
+      "shape": [
+        5120,
+        17408
+      ],
+      "group_size": 128,
+      "max_error": 0.0192173533141613,
+      "theoretical_max_bound": 0.01935223134458065,
+      "mean_error": 0.0011016963981091976,
+      "cosine_similarity": 1.0141600370407104,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.20.mlp.gate_proj.weight",
+      "shape": [
+        17408,
+        5120
+      ],
+      "group_size": 128,
+      "max_error": 0.0182756707072258,
+      "theoretical_max_bound": 0.0185151791036129,
+      "mean_error": 0.0011515532387420535,
+      "cosine_similarity": 1.0123226642608643,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.40.linear_attn.out_proj.weight",
+      "shape": [
+        5120,
+        6144
+      ],
+      "group_size": 128,
+      "max_error": 0.059814453125,
+      "theoretical_max_bound": 0.060088837689161304,
+      "mean_error": 0.0015785538125783205,
+      "cosine_similarity": 0.9926260113716125,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.50.mlp.up_proj.weight",
+      "shape": [
+        17408,
+        5120
+      ],
+      "group_size": 128,
+      "max_error": 0.0164446160197258,
+      "theoretical_max_bound": 0.01718984375,
+      "mean_error": 0.0012305935379117727,
+      "cosine_similarity": 1.011409044265747,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "model.language_model.layers.63.self_attn.o_proj.weight",
+      "shape": [
+        5120,
+        6144
+      ],
+      "group_size": 128,
+      "max_error": 0.05419921875,
+      "theoretical_max_bound": 0.056740625,
+      "mean_error": 0.0020404672250151634,
+      "cosine_similarity": 0.9927184581756592,
+      "parity_passed": true
+    },
+    {
+      "tensor_name": "lm_head.weight",
+      "shape": [
+        248320,
+        5120
+      ],
+      "group_size": 128,
+      "max_error": 0.0242919921875,
+      "theoretical_max_bound": 0.0245140625,
+      "mean_error": 0.0014363883528858423,
+      "cosine_similarity": 1.646870732307434,
+      "parity_passed": true
+    }
+  ]
+}

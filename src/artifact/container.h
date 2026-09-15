@@ -15,7 +15,7 @@ inline constexpr std::array<uint8_t, 8> FOOTER_MAGIC_BYTES = {'X', 'I', 'N', 'F'
 
 inline constexpr uint32_t CURRENT_FORMAT_VERSION = 1;
 inline constexpr uint64_t SECTION_ALIGNMENT = 64; // 64-byte alignment for cache line & GPU DMA
-inline constexpr size_t MAX_SECTION_NAME_LEN = 64;
+inline constexpr size_t MAX_SECTION_NAME_LEN = 96;
 
 enum class SectionType : uint32_t {
     RawBlob       = 0x0000,
@@ -44,16 +44,16 @@ struct FileHeader {
 };
 static_assert(sizeof(FileHeader) == 64, "FileHeader must be exactly 64 bytes");
 
-// Section Table Entry: 96 bytes total
+// Section Table Entry: 128 bytes total (2 cache lines, power of 2)
 struct SectionEntry {
-    char     name[MAX_SECTION_NAME_LEN]; // Null-terminated ASCII/UTF-8 section name
+    char     name[MAX_SECTION_NAME_LEN]; // Null-terminated ASCII/UTF-8 section name (up to 95 chars)
     uint32_t type_tag;                   // SectionType
     uint32_t flags;                      // Alignment or compression flags (0 for uncompressed)
     uint64_t offset;                     // File offset where section data starts (64-byte aligned)
     uint64_t size;                       // Byte length of payload
     uint64_t checksum;                   // CRC-64 of section payload
 };
-static_assert(sizeof(SectionEntry) == 96, "SectionEntry must be exactly 96 bytes");
+static_assert(sizeof(SectionEntry) == 128, "SectionEntry must be exactly 128 bytes");
 
 // Trailing Checksum Footer: 16 bytes total
 struct FileFooter {

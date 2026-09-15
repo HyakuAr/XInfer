@@ -23,12 +23,28 @@ target_include_directories(xinfer_artifact PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+# C API shared library for fast Python converter integration
+add_library(xinfer_artifact_c SHARED
+    src/artifact/checksum.cpp
+    src/artifact/c_api.cpp
+)
+target_include_directories(xinfer_artifact_c PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
 # Milestone 1: Round-trip test
 add_executable(test_artifact_roundtrip
     tests/test_artifact_roundtrip.cpp
 )
-
 target_link_libraries(test_artifact_roundtrip PRIVATE
+    xinfer_artifact
+)
+
+# Milestone 2: Artifact inspection and parity verification tool
+add_executable(verify_artifact
+    tools/parity/verify_artifact.cpp
+)
+target_link_libraries(verify_artifact PRIVATE
     xinfer_artifact
 )
 
