@@ -99,7 +99,8 @@ bool ArtifactWriter::write_to_file(const std::string& filepath, std::string* err
 
         SectionEntry entry{};
         std::memset(&entry, 0, sizeof(entry));
-        std::strncpy(entry.name, sec.name.c_str(), sizeof(entry.name) - 1);
+        size_t copy_len = std::min(sec.name.size(), sizeof(entry.name) - 1);
+        std::memcpy(entry.name, sec.name.data(), copy_len);
         entry.type_tag = static_cast<uint32_t>(sec.type);
         entry.flags = sec.flags;
         entry.offset = current_offset;

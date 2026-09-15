@@ -30,26 +30,22 @@ constexpr auto CRC_TABLE = generate_crc64_table();
 
 } // anonymous namespace
 
-const uint64_t Crc64::table_[256] = {};
-
-Crc64::Crc64() : crc_(0ULL) {}
+Crc64::Crc64() : crc_(0xFFFFFFFFFFFFFFFFULL) {}
 
 void Crc64::reset() {
-    crc_ = 0ULL;
+    crc_ = 0xFFFFFFFFFFFFFFFFULL;
 }
 
 void Crc64::update(const void* data, size_t length) {
     const auto* bytes = static_cast<const uint8_t*>(data);
-    uint64_t c = crc_ ^ 0xFFFFFFFFFFFFFFFFULL;
     for (size_t i = 0; i < length; ++i) {
-        uint8_t index = static_cast<uint8_t>(c ^ bytes[i]);
-        c = (c >> 8) ^ CRC_TABLE.entries[index];
+        uint8_t index = static_cast<uint8_t>(crc_ ^ bytes[i]);
+        crc_ = (crc_ >> 8) ^ CRC_TABLE.entries[index];
     }
-    crc_ = c ^ 0xFFFFFFFFFFFFFFFFULL;
 }
 
 uint64_t Crc64::digest() const {
-    return crc_;
+    return crc_ ^ 0xFFFFFFFFFFFFFFFFULL;
 }
 
 uint64_t Crc64::calculate(const void* data, size_t length) {

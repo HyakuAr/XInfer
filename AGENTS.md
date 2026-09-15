@@ -89,7 +89,24 @@ dispatch, or a second artifact format "for flexibility." If a future
 milestone genuinely needs a second target, extend `src/targets/` the way
 ninfer did — a peer variant reusing the family layer — not a rewrite.
 
-## 5. Sources of truth
+## 5. Grounding requirement for vendor-specific code
+
+Before writing any code that depends on a specific Intel API, flag, aspect
+string, or numeric limit (SYCL Joint Matrix, Level Zero, XeTLA, driver
+behavior), you must first open the corresponding local file in
+`docs/vendor/` and cite the specific fact you're using, in the same response,
+before the code. See `docs/vendor/README.md` for the full rule and the list
+of what's already extracted vs. what still needs fetching.
+
+If the relevant `docs/vendor/*.md` file doesn't exist yet, stop and say so —
+do not write the code from memory and present it as if it were checked
+against documentation. This applies even when the general shape of the code
+"looks right" from training knowledge; APIs like Joint Matrix are new and
+narrow enough that plausible-looking code is frequently wrong in specifics
+(exact function names, required device aspects, tile-shape assumptions that
+don't hold on Battlemage/Xe2).
+
+## 6. Sources of truth
 
 Read only what's relevant to the task at hand — this is a routing map, not a
 reading list to consume in full every time.
@@ -103,7 +120,7 @@ reading list to consume in full every time.
 - [Level Zero Specification](https://oneapi-src.github.io/level-zero-spec/level-zero/latest/) — once a milestone needs command-list/graph control below SYCL.
 - [XeTLA GEMM construction guide](https://github.com/intel/xetla/blob/main/media/docs/construct_a_gemm.md) — reference for high-performance GEMM structure.
 
-## 6. Numerical correctness
+## 7. Numerical correctness
 
 Every kernel that touches model math needs one independent oracle:
 
@@ -119,7 +136,7 @@ Every kernel that touches model math needs one independent oracle:
   against the original BF16 weights (per-group scale/zero-point), not
   against another kernel's output.
 
-## 7. Performance work
+## 8. Performance work
 
 - State a performance claim at the level it actually matters: single op,
   decode step, or end-to-end tokens/sec. Measure at that level.
@@ -130,7 +147,7 @@ Every kernel that touches model math needs one independent oracle:
   model/quant config, workload) without needing full raw profiler dumps by
   default.
 
-## 8. Tests and verification
+## 9. Tests and verification
 
 Add a test only when it protects real behavior: numerical kernel
 correctness, `.xinfer` framing/binding round-trip, a real end-to-end decode,
@@ -146,7 +163,7 @@ getters, or hypothetical failure modes.
 | Engine / decode loop | end-to-end token generation sanity check |
 | Serving layer | request/response schema test against the OpenAI spec |
 
-## 9. Local environment
+## 10. Local environment
 
 Do not assume any of this is installed — verify before use, per Section 0.
 
@@ -159,7 +176,7 @@ Do not assume any of this is installed — verify before use, per Section 0.
 | Model source | official `Qwen/Qwen3.8-27B` BF16 checkpoint (path TBD by user) |
 | Artifact output | `out/qwen3_8_27b.xinfer` (once Milestone ≥2) |
 
-## 10. Commits
+## 11. Commits
 
 Create a commit only when the user explicitly asks for one. Use
 Conventional Commit style subjects, e.g.:

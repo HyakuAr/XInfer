@@ -28,6 +28,11 @@ installed without asking.
 **Goal:** define the `.xinfer` binary container format and prove read/write
 round-trips work, before any model content exists.
 
+**Result:** binary container layout (64-byte aligned payloads, CRC-64/ECMA-182
+checksums, zero-dependency JSON metadata) defined and implemented in
+`src/artifact/`. Format documented in `docs/artifact-format.md`.
+Round-trip test passes byte-exact payload verification and corruption/truncation detection.
+
 **Steps:**
 1. Design a minimal container header: magic bytes, format version, section
    table (offset + length + type tag per section), and a trailing checksum.
@@ -64,7 +69,7 @@ execution yet.
 4. Implement a dequantization parity check: for a sample of tensors, dequant
    the INT4-packed weights and compare against the original BF16 weights
    within a stated tolerance (this is the numerical oracle from
-   `AGENTS.md` §6).
+   `AGENTS.md` §7).
 
 **DoD:**
 - [ ] Converter script/tool in `tools/convert/qwen3_8_27b/`.
@@ -110,7 +115,7 @@ needs, correct before fast.
 3. Implement naive (non-fused) scaled-dot-product attention for a single
    sequence.
 4. For each op, write a numerical oracle test (naive FP32 CPU reference)
-   per `AGENTS.md` §6, run at realistic Qwen3.8-27B shapes.
+   per `AGENTS.md` §7, run at realistic Qwen3.8-27B shapes.
 
 **DoD:**
 - [ ] Every op needed for one forward pass exists in `src/ops/`, naive only.
@@ -175,8 +180,10 @@ prompts longer than a single forward pass comfortably handles.
 naive baseline.
 
 **Steps:**
-1. Study the Joint Matrix Extension guide and XeTLA's GEMM construction
-   doc (see `AGENTS.md` §5) before writing kernels.
+1. Read `docs/vendor/xmx-joint-matrix.md` and (once fetched per
+   `docs/vendor/README.md`) the XeTLA GEMM construction note. Per
+   `AGENTS.md` §5, cite specific facts from these files before writing any
+   kernel code.
 2. Implement an XMX-based GEMM kernel; verify against the same numerical
    oracle used in M4 (correctness first, still).
 3. Implement XMX-based (or XMX-assisted) attention.
@@ -190,7 +197,7 @@ naive baseline.
 - [ ] Measured, documented speedup over the naive baseline at end-to-end
       decode level, not just microbenchmark level.
 - [ ] Naive kernels removed or clearly marked as reference-only (per
-      `AGENTS.md` §9 on not maintaining dead parallel paths).
+      `AGENTS.md` §1 on not preserving superseded internal paths).
 
 ---
 
@@ -211,7 +218,7 @@ per-step launch overhead.
 **DoD:**
 - [ ] Decode step runs via captured/replayed command list.
 - [ ] Measured latency improvement documented.
-- [ ] Address-stability assumptions (per `AGENTS.md` §6) documented for the
+- [ ] Address-stability assumptions (per `AGENTS.md` §7) documented for the
       captured graph.
 
 ---

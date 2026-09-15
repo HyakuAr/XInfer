@@ -19,7 +19,6 @@ public:
 
 private:
     uint64_t crc_;
-    static const uint64_t table_[256];
 };
 
 } // namespace xinfer::artifact
