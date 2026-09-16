@@ -18,6 +18,7 @@ void rope(sycl::queue& q,
           int64_t num_kv_heads,
           int64_t head_dim,
           const int64_t* positions,
-          float theta = 10000000.0f);
+          float theta = 10000000.0f,
+          int64_t rotary_dim = 64);
 
 } // namespace xinfer::ops

@@ -104,3 +104,48 @@ target_compile_options(test_ops_oracle PRIVATE -fsycl)
 target_link_options(test_ops_oracle PRIVATE -fsycl)
 
 add_test(NAME OpsOracleTest COMMAND test_ops_oracle)
+
+# Milestone 5: Minimal Engine (End-to-End Single-Request Decode)
+add_library(xinfer_targets STATIC
+    src/targets/qwen3_8/tokenizer.cpp
+    src/targets/qwen3_8/linear_attn.cpp
+    src/targets/qwen3_8/forward.cpp
+    src/targets/qwen3_8_27b/weights.cpp
+)
+target_include_directories(xinfer_targets PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(xinfer_targets PUBLIC
+    xinfer_ops
+    xinfer_core
+    xinfer_artifact
+)
+target_compile_options(xinfer_targets PUBLIC -fsycl)
+target_link_options(xinfer_targets PUBLIC -fsycl)
+
+add_library(xinfer_runtime STATIC
+    src/runtime/engine.cpp
+)
+target_include_directories(xinfer_runtime PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(xinfer_runtime PUBLIC
+    xinfer_targets
+)
+target_compile_options(xinfer_runtime PUBLIC -fsycl)
+target_link_options(xinfer_runtime PUBLIC -fsycl)
+
+add_executable(xinfer
+    apps/xinfer/main.cpp
+)
+target_include_directories(xinfer PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(xinfer PRIVATE
+    xinfer_runtime
+)
+target_compile_options(xinfer PRIVATE -fsycl)
+target_link_options(xinfer PRIVATE -fsycl)
+

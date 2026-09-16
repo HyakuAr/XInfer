@@ -14,7 +14,7 @@ void gemm_naive(sycl::queue& q, float* C, const float* A, const float* B, int64_
             acc += A[m * K + k] * B[k * N + n];
         }
         C[m * N + n] = acc;
-    }).wait();
+    });
 }
 
 void linear_naive(sycl::queue& q,
@@ -42,7 +42,7 @@ void linear_naive(sycl::queue& q,
             acc += bias[n];
         }
         Y[m * N + n] = acc;
-    }).wait();
+    });
 }
 
 void linear_int4_naive(sycl::queue& q,
@@ -95,7 +95,7 @@ void linear_int4_naive(sycl::queue& q,
             acc += bias[n];
         }
         Y[m * N + n] = acc;
-    }).wait();
+    });
 }
 
 } // namespace xinfer::ops

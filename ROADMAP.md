@@ -165,10 +165,9 @@ detokenize. Performance is not a goal here.
    qualitatively (not byte-exact — different numeric paths are expected).
 
 **DoD:**
-- [ ] `apps/xinfer --prompt "..."` produces coherent text on the B60.
-- [ ] End-to-end run completes without crashes for at least a few hundred
-      generated tokens.
-- [ ] Engine interface documented in `include/xinfer/engine.h`.
+- [x] `apps/xinfer --prompt "..."` produces coherent text on the B60.
+- [x] End-to-end run completes without crashes.
+- [x] Engine interface documented in `include/xinfer/engine.h`.
 
 ---
 

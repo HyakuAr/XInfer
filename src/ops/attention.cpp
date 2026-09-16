@@ -70,7 +70,7 @@ void sdpa_causal_naive(sycl::queue& q,
         for (int64_t d = 0; d < head_dim; ++d) {
             out_vec[d] *= inv_sum;
         }
-    }).wait();
+    });
 }
 
 } // namespace xinfer::ops

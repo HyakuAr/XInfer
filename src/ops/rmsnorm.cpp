@@ -30,7 +30,7 @@ void rmsnorm(sycl::queue& q,
         for (int64_t i = 0; i < hidden_size; ++i) {
             y[i] = x[i] * rsqrt_val * weight[i];
         }
-    }).wait();
+    });
 }
 
 void rmsnorm_residual(sycl::queue& q,
@@ -62,7 +62,7 @@ void rmsnorm_residual(sycl::queue& q,
         for (int64_t i = 0; i < hidden_size; ++i) {
             y[i] = res[i] * rsqrt_val * weight[i];
         }
-    }).wait();
+    });
 }
 
 } // namespace xinfer::ops
