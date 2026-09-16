@@ -356,20 +356,57 @@ void test_linear_oracle(DeviceContext& ctx) {
     ctx.copy_host_to_device(d_W, h_W_int4.data(), N * (K / 2));
     ctx.copy_host_to_device(d_scales, h_scales.data(), N * num_groups * sizeof(sycl::half));
 
-    linear_int4_naive(ctx.queue(), d_Y, d_X, d_W, d_scales, nullptr, M, N, K, group_size);
+    // GPU execution of accelerated linear_int4
+    linear_int4(ctx.queue(), d_Y, d_X, d_W, d_scales, nullptr, M, N, K, group_size);
 
     std::vector<float> gpu_Y(M * N);
     ctx.copy_device_to_host(gpu_Y.data(), d_Y, M * N * sizeof(float));
+
+    DiffStats diff = compare_buffers(oracle_Y.data(), gpu_Y.data(), M * N);
+    std::cout << "  Accelerated INT4 Linear Max Abs Diff: " << diff.max_abs << " | Mean Abs: " << diff.mean_abs << std::endl;
+    assert(diff.max_abs <= 1e-4f);
+    std::cout << "  -> PASSED: Accelerated INT4 Linear matches numerical oracle." << std::endl;
+
+    // Reference naive test
+    linear_int4_naive(ctx.queue(), d_Y, d_X, d_W, d_scales, nullptr, M, N, K, group_size);
+    ctx.copy_device_to_host(gpu_Y.data(), d_Y, M * N * sizeof(float));
+    DiffStats diff_naive = compare_buffers(oracle_Y.data(), gpu_Y.data(), M * N);
+    std::cout << "  Reference Naive INT4 Linear Max Abs Diff: " << diff_naive.max_abs << std::endl;
+    assert(diff_naive.max_abs <= 1e-4f);
+    std::cout << "  -> PASSED: Reference Naive INT4 Linear matches numerical oracle." << std::endl;
 
     ctx.free_device(d_X);
     ctx.free_device(d_W);
     ctx.free_device(d_scales);
     ctx.free_device(d_Y);
 
-    DiffStats diff = compare_buffers(oracle_Y.data(), gpu_Y.data(), M * N);
-    std::cout << "  INT4 Linear Max Abs Diff: " << diff.max_abs << " | Mean Abs: " << diff.mean_abs << std::endl;
-    assert(diff.max_abs <= 1e-4f);
-    std::cout << "  -> PASSED: INT4 Linear matches numerical oracle." << std::endl;
+    // Test XMX Systolic GEMM (M = 16, K = 32, N = 64)
+    std::cout << "  Testing XMX Systolic GEMM (M = 16, K = 32, N = 64)..." << std::endl;
+    const int64_t gM = 16, gK = 32, gN = 64;
+    std::vector<sycl::half> h_A(gM * gK, sycl::half{1.5f});
+    std::vector<sycl::half> h_B(gK * gN, sycl::half{2.0f});
+    std::vector<float> h_C_oracle(gM * gN, static_cast<float>(gK) * 1.5f * 2.0f);
+
+    sycl::half* d_A = static_cast<sycl::half*>(ctx.allocate_device(gM * gK * sizeof(sycl::half)));
+    sycl::half* d_B = static_cast<sycl::half*>(ctx.allocate_device(gK * gN * sizeof(sycl::half)));
+    float* d_C = static_cast<float*>(ctx.allocate_device(gM * gN * sizeof(float)));
+
+    ctx.copy_host_to_device(d_A, h_A.data(), gM * gK * sizeof(sycl::half));
+    ctx.copy_host_to_device(d_B, h_B.data(), gK * gN * sizeof(sycl::half));
+
+    gemm_xmx(ctx.queue(), d_C, d_A, d_B, gM, gN, gK);
+
+    std::vector<float> gpu_C(gM * gN);
+    ctx.copy_device_to_host(gpu_C.data(), d_C, gM * gN * sizeof(float));
+
+    ctx.free_device(d_A);
+    ctx.free_device(d_B);
+    ctx.free_device(d_C);
+
+    DiffStats diff_xmx = compare_buffers(h_C_oracle.data(), gpu_C.data(), gM * gN);
+    std::cout << "  XMX GEMM Max Abs Diff: " << diff_xmx.max_abs << std::endl;
+    assert(diff_xmx.max_abs <= 1e-4f);
+    std::cout << "  -> PASSED: XMX Systolic GEMM matches numerical oracle." << std::endl;
 }
 
 // -----------------------------------------------------------------------------
@@ -459,15 +496,31 @@ void test_attention_oracle(DeviceContext& ctx) {
     std::vector<float> gpu_out(q_elements);
     ctx.copy_device_to_host(gpu_out.data(), d_out, q_elements * sizeof(float));
 
+    DiffStats diff = compare_buffers(oracle_out.data(), gpu_out.data(), q_elements);
+    std::cout << "  SDPA Naive Max Abs Diff: " << diff.max_abs << " | Mean Abs: " << diff.mean_abs << std::endl;
+    assert(diff.max_abs <= 1e-4f);
+    std::cout << "  -> PASSED: Causal SDPA Naive matches numerical oracle." << std::endl;
+
+    // Test Accelerated Cached SDPA
+    std::cout << "  Testing Accelerated Cached SDPA with Sub-groups..." << std::endl;
+    sycl::half* d_k_cache = static_cast<sycl::half*>(ctx.allocate_device(kv_elements * sizeof(sycl::half)));
+    sycl::half* d_v_cache = static_cast<sycl::half*>(ctx.allocate_device(kv_elements * sizeof(sycl::half)));
+    attention_write_kv_cache(ctx.queue(), d_k_cache, d_v_cache, d_K, d_V, 0, seq_len, num_kv_heads, head_dim);
+
+    sdpa_causal_cached(ctx.queue(), d_out, d_Q, d_k_cache, d_v_cache, 0, seq_len, num_q_heads, num_kv_heads, head_dim, scale);
+    ctx.copy_device_to_host(gpu_out.data(), d_out, q_elements * sizeof(float));
+
+    ctx.free_device(d_k_cache);
+    ctx.free_device(d_v_cache);
     ctx.free_device(d_Q);
     ctx.free_device(d_K);
     ctx.free_device(d_V);
     ctx.free_device(d_out);
 
-    DiffStats diff = compare_buffers(oracle_out.data(), gpu_out.data(), q_elements);
-    std::cout << "  SDPA Max Abs Diff: " << diff.max_abs << " | Mean Abs: " << diff.mean_abs << std::endl;
-    assert(diff.max_abs <= 1e-4f);
-    std::cout << "  -> PASSED: Causal SDPA matches numerical oracle." << std::endl;
+    DiffStats diff_cached = compare_buffers(oracle_out.data(), gpu_out.data(), q_elements);
+    std::cout << "  Accelerated SDPA Cached Max Abs Diff: " << diff_cached.max_abs << std::endl;
+    assert(diff_cached.max_abs <= 1e-3f); // FP16 KV cache tolerance
+    std::cout << "  -> PASSED: Accelerated Cached SDPA matches numerical oracle." << std::endl;
 }
 
 // -----------------------------------------------------------------------------

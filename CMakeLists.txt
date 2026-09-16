@@ -93,6 +93,7 @@ add_library(xinfer_ops STATIC
     src/ops/elementwise.cpp
     src/ops/softmax.cpp
     src/ops/linear.cpp
+    src/ops/gemm_xmx.cpp
     src/ops/attention.cpp
     src/ops/sampling.cpp
 )

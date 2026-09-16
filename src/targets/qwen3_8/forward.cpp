@@ -101,15 +101,15 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
         if (layer.layer_type == "full_attention") {
             // Full attention:
             // Projections
-            ops::linear_int4_naive(q, act_q_gate, act_normed,
+            ops::linear_int4(q, act_q_gate, act_normed,
                                    static_cast<const uint8_t*>(layer.q_proj.d_weights_int4),
                                    static_cast<const sycl::half*>(layer.q_proj.d_scales),
                                    nullptr, seq_len, 12288, hidden_size);
-            ops::linear_int4_naive(q, act_k, act_normed,
+            ops::linear_int4(q, act_k, act_normed,
                                    static_cast<const uint8_t*>(layer.k_proj.d_weights_int4),
                                    static_cast<const sycl::half*>(layer.k_proj.d_scales),
                                    nullptr, seq_len, 1024, hidden_size);
-            ops::linear_int4_naive(q, act_v, act_normed,
+            ops::linear_int4(q, act_v, act_normed,
                                    static_cast<const uint8_t*>(layer.v_proj.d_weights_int4),
                                    static_cast<const sycl::half*>(layer.v_proj.d_scales),
                                    nullptr, seq_len, 1024, hidden_size);
@@ -151,26 +151,26 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
             });
 
             // Out projection
-            ops::linear_int4_naive(q, act_proj_out, act_attn_out,
+            ops::linear_int4(q, act_proj_out, act_attn_out,
                                    static_cast<const uint8_t*>(layer.o_proj.d_weights_int4),
                                    static_cast<const sycl::half*>(layer.o_proj.d_scales),
                                    nullptr, seq_len, hidden_size, 6144);
             full_idx++;
         } else {
             // Linear attention:
-            ops::linear_int4_naive(q, act_qkv_raw, act_normed,
+            ops::linear_int4(q, act_qkv_raw, act_normed,
                                    static_cast<const uint8_t*>(layer.in_proj_qkv.d_weights_int4),
                                    static_cast<const sycl::half*>(layer.in_proj_qkv.d_scales),
                                    nullptr, seq_len, 10240, hidden_size);
-            ops::linear_int4_naive(q, act_z, act_normed,
+            ops::linear_int4(q, act_z, act_normed,
                                    static_cast<const uint8_t*>(layer.in_proj_z.d_weights_int4),
                                    static_cast<const sycl::half*>(layer.in_proj_z.d_scales),
                                    nullptr, seq_len, 6144, hidden_size);
-            ops::linear_int4_naive(q, act_b, act_normed,
+            ops::linear_int4(q, act_b, act_normed,
                                    static_cast<const uint8_t*>(layer.in_proj_b.d_weights_int4),
                                    static_cast<const sycl::half*>(layer.in_proj_b.d_scales),
                                    nullptr, seq_len, 48, hidden_size);
-            ops::linear_int4_naive(q, act_a, act_normed,
+            ops::linear_int4(q, act_a, act_normed,
                                    static_cast<const uint8_t*>(layer.in_proj_a.d_weights_int4),
                                    static_cast<const sycl::half*>(layer.in_proj_a.d_scales),
                                    nullptr, seq_len, 48, hidden_size);
@@ -185,7 +185,7 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
                                        kv_cache.linear_state(linear_idx), seq_len, zero_linear_state);
 
             // Out projection
-            ops::linear_int4_naive(q, act_proj_out, act_delta_out,
+            ops::linear_int4(q, act_proj_out, act_delta_out,
                                    static_cast<const uint8_t*>(layer.out_proj.d_weights_int4),
                                    static_cast<const sycl::half*>(layer.out_proj.d_scales),
                                    nullptr, seq_len, hidden_size, 6144);
@@ -198,11 +198,11 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
         // MLP
         ops::rmsnorm(q, act_normed, act_x, layer.d_post_attention_layernorm, seq_len, hidden_size);
 
-        ops::linear_int4_naive(q, act_mlp_gate, act_normed,
+        ops::linear_int4(q, act_mlp_gate, act_normed,
                                static_cast<const uint8_t*>(layer.gate_proj.d_weights_int4),
                                static_cast<const sycl::half*>(layer.gate_proj.d_scales),
                                nullptr, seq_len, intermediate_size, hidden_size);
-        ops::linear_int4_naive(q, act_mlp_up, act_normed,
+        ops::linear_int4(q, act_mlp_up, act_normed,
                                static_cast<const uint8_t*>(layer.up_proj.d_weights_int4),
                                static_cast<const sycl::half*>(layer.up_proj.d_scales),
                                nullptr, seq_len, intermediate_size, hidden_size);
@@ -211,7 +211,7 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
         ops::swiglu(q, act_mlp_gate, act_mlp_gate, act_mlp_up, seq_len * intermediate_size);
 
         // Down projection
-        ops::linear_int4_naive(q, act_proj_out, act_mlp_gate,
+        ops::linear_int4(q, act_proj_out, act_mlp_gate,
                                static_cast<const uint8_t*>(layer.down_proj.d_weights_int4),
                                static_cast<const sycl::half*>(layer.down_proj.d_scales),
                                nullptr, seq_len, hidden_size, intermediate_size);
@@ -227,7 +227,7 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
 
         constexpr int64_t vocab_size = 248320;
         const auto& lm_head = model.lm_head();
-        ops::linear_int4_naive(q, out_last_token_logits, act_normed,
+        ops::linear_int4(q, out_last_token_logits, act_normed,
                                static_cast<const uint8_t*>(lm_head.d_weights_int4),
                                static_cast<const sycl::half*>(lm_head.d_scales),
                                nullptr, 1, vocab_size, hidden_size);
