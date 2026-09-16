@@ -4,6 +4,7 @@
 #include "artifact/reader.h"
 #include "targets/qwen3_8/tokenizer.h"
 #include "targets/qwen3_8/forward.h"
+#include "targets/qwen3_8/decode_graph.h"
 #include "core/kv_cache.h"
 #include <chrono>
 #include <iostream>
@@ -26,9 +27,10 @@ public:
         }
 
         const auto& arch = ctx_->arch_info();
+        uint64_t vram_gb = (arch.global_mem_bytes + (1024ULL * 1024 * 1024 - 1)) / (1024ULL * 1024 * 1024);
         std::cout << "[xinfer::Engine] Hardware Target: " << arch.device_name
                   << " (" << arch.xe_core_count << " Xe-cores, "
-                  << (arch.global_mem_bytes / (1024 * 1024 * 1024)) << " GB VRAM)" << std::endl;
+                  << vram_gb << " GB VRAM)" << std::endl;
 
         // 2. Open .xinfer container artifact
         artifact::ArtifactReader reader;
@@ -76,6 +78,14 @@ public:
         }
         std::cout << "[xinfer::Engine] Initialized KV cache (max_seq_len=" << config.max_seq_len
                   << ", " << (kv_cache_->total_allocated_bytes() / (1024 * 1024)) << " MB VRAM)" << std::endl;
+
+        // 7. Initialize and capture Level Zero / SYCL decode graph for fixed-shape decode step (Milestone 8)
+        decode_graph_ = std::make_unique<targets::qwen3_8::DecodeGraph>(ctx_, *model_, *kv_cache_);
+        if (decode_graph_->capture()) {
+            std::cout << "[xinfer::Engine] Captured Level Zero decode command graph (M8 active)" << std::endl;
+        } else {
+            std::cout << "[xinfer::Engine] Graph capture fallback to standard kernel submission" << std::endl;
+        }
 
         is_loaded_ = true;
         return true;
@@ -136,10 +146,16 @@ public:
             }
         }
 
-        // 2. Autoregressive single-token decode loop using persistent KV cache
+        // 2. Autoregressive single-token decode loop using persistent KV cache and captured command graph
         for (int step = 1; step < gen_config.max_new_tokens; ++step) {
-            int64_t next_tok = targets::qwen3_8::decode_step(
-                ctx_, *arena_, *model_, *kv_cache_, current_tok);
+            int64_t next_tok = 0;
+            if (decode_graph_ && decode_graph_->is_captured()) {
+                next_tok = decode_graph_->decode_step(current_tok, kv_cache_->current_seq_len());
+                kv_cache_->advance(1);
+            } else {
+                next_tok = targets::qwen3_8::decode_step(
+                    ctx_, *arena_, *model_, *kv_cache_, current_tok);
+            }
 
             if (next_tok == gen_config.eos_token_id || next_tok == gen_config.im_end_token_id) {
                 break;
@@ -185,6 +201,7 @@ private:
     std::unique_ptr<targets::qwen3_8_27b::LoadedModel> model_;
     std::unique_ptr<core::DeviceArena> arena_;
     std::unique_ptr<core::KVCache> kv_cache_;
+    std::unique_ptr<targets::qwen3_8::DecodeGraph> decode_graph_;
     targets::qwen3_8::QwenTokenizer tokenizer_;
     EngineConfig config_;
     bool is_loaded_{false};

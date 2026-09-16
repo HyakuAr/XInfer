@@ -123,6 +123,7 @@ add_library(xinfer_targets STATIC
     src/targets/qwen3_8/tokenizer.cpp
     src/targets/qwen3_8/linear_attn.cpp
     src/targets/qwen3_8/forward.cpp
+    src/targets/qwen3_8/decode_graph.cpp
     src/targets/qwen3_8_27b/weights.cpp
 )
 target_include_directories(xinfer_targets PUBLIC
@@ -161,4 +162,17 @@ target_link_libraries(xinfer PRIVATE
 )
 target_compile_options(xinfer PRIVATE -fsycl)
 target_link_options(xinfer PRIVATE -fsycl)
+
+add_executable(test_decode_graph
+    tests/test_decode_graph.cpp
+)
+target_link_libraries(test_decode_graph PRIVATE
+    xinfer_targets
+    xinfer_runtime
+)
+target_compile_options(test_decode_graph PRIVATE -fsycl)
+target_link_options(test_decode_graph PRIVATE -fsycl)
+
+add_test(NAME DecodeGraphTest COMMAND test_decode_graph)
+
 

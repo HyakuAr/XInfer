@@ -33,6 +33,17 @@ void attention_write_kv_cache(sycl::queue& q,
                               int64_t num_kv_heads,
                               int64_t head_dim);
 
+// Dynamic device-pointer overload for command-graph capture/replay
+void attention_write_kv_cache_dynamic(sycl::queue& q,
+                                      sycl::half* k_cache,
+                                      sycl::half* v_cache,
+                                      const float* K_in,
+                                      const float* V_in,
+                                      const int64_t* d_start_pos,
+                                      int64_t num_tokens,
+                                      int64_t num_kv_heads,
+                                      int64_t head_dim);
+
 // Causal SDPA reading from FP16 KV cache (supports single-token decode and chunked prefill)
 // Q: [num_q_tokens, num_q_heads, head_dim] (float)
 // k_cache, v_cache: [max_seq_len, num_kv_heads, head_dim] (sycl::half)
@@ -49,5 +60,18 @@ void sdpa_causal_cached(sycl::queue& q,
                         int64_t num_kv_heads,
                         int64_t head_dim,
                         float scale = 0.0f);
+
+// Dynamic device-pointer overload for command-graph capture/replay
+void sdpa_causal_cached_dynamic(sycl::queue& q,
+                                float* out,
+                                const float* Q,
+                                const sycl::half* k_cache,
+                                const sycl::half* v_cache,
+                                const int64_t* d_start_pos,
+                                int64_t num_q_tokens,
+                                int64_t num_q_heads,
+                                int64_t num_kv_heads,
+                                int64_t head_dim,
+                                float scale = 0.0f);
 
 } // namespace xinfer::ops
