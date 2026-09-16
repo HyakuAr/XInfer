@@ -98,6 +98,30 @@ int main() {
     }
     std::cout << "[PASS] KVCache::clear() succeeded\n";
 
+    // Test advance and bounds checking
+    if (cache.max_seq_len() != 512) {
+        std::cerr << "FAILED: KVCache::max_seq_len mismatch\n";
+        return 1;
+    }
+    if (!cache.can_advance(512) || cache.can_advance(513)) {
+        std::cerr << "FAILED: KVCache::can_advance check failed\n";
+        return 1;
+    }
+    cache.set_seq_len(510);
+    if (!cache.advance(2) || cache.current_seq_len() != 512) {
+        std::cerr << "FAILED: KVCache::advance to limit failed\n";
+        return 1;
+    }
+    if (cache.advance(1)) {
+        std::cerr << "FAILED: KVCache::advance past max_seq_len did not return false\n";
+        return 1;
+    }
+    if (cache.current_seq_len() != 512) {
+        std::cerr << "FAILED: KVCache::advance past max_seq_len did not clamp current_seq_len\n";
+        return 1;
+    }
+    std::cout << "[PASS] KVCache bounds checking and advance() clamping verified\n";
+
     std::cout << "All KVCache tests PASSED!\n";
     return 0;
 }

@@ -84,8 +84,15 @@ void attention_write_kv_cache(sycl::queue& q,
                               int64_t start_pos,
                               int64_t num_tokens,
                               int64_t num_kv_heads,
-                              int64_t head_dim) {
+                              int64_t head_dim,
+                              int64_t max_seq_len) {
     if (num_tokens <= 0 || num_kv_heads <= 0 || head_dim <= 0) return;
+    if (max_seq_len > 0) {
+        if (start_pos >= max_seq_len || start_pos < 0) return;
+        if (start_pos + num_tokens > max_seq_len) {
+            num_tokens = max_seq_len - start_pos;
+        }
+    }
     int64_t kv_stride = num_kv_heads * head_dim;
     size_t total_elements = static_cast<size_t>(num_tokens * kv_stride);
 
@@ -93,7 +100,11 @@ void attention_write_kv_cache(sycl::queue& q,
         size_t i = idx[0];
         size_t t = i / kv_stride;
         size_t rem = i % kv_stride;
-        size_t cache_idx = (static_cast<size_t>(start_pos) + t) * kv_stride + rem;
+        int64_t pos = start_pos + static_cast<int64_t>(t);
+        if (max_seq_len > 0 && (pos < 0 || pos >= max_seq_len)) {
+            return;
+        }
+        size_t cache_idx = static_cast<size_t>(pos) * kv_stride + rem;
 
         k_cache[cache_idx] = static_cast<sycl::half>(K_in[i]);
         v_cache[cache_idx] = static_cast<sycl::half>(V_in[i]);
@@ -108,7 +119,8 @@ sycl::event attention_write_kv_cache_dynamic(sycl::queue& q,
                                        const int64_t* d_start_pos,
                                        int64_t num_tokens,
                                        int64_t num_kv_heads,
-                                       int64_t head_dim) {
+                                       int64_t head_dim,
+                                       int64_t max_seq_len) {
     if (num_tokens <= 0 || num_kv_heads <= 0 || head_dim <= 0) return sycl::event{};
     int64_t kv_stride = num_kv_heads * head_dim;
     size_t total_elements = static_cast<size_t>(num_tokens * kv_stride);
@@ -118,7 +130,11 @@ sycl::event attention_write_kv_cache_dynamic(sycl::queue& q,
         size_t t = i / kv_stride;
         size_t rem = i % kv_stride;
         int64_t start_pos = *d_start_pos;
-        size_t cache_idx = (static_cast<size_t>(start_pos) + t) * kv_stride + rem;
+        int64_t pos = start_pos + static_cast<int64_t>(t);
+        if (pos < 0 || (max_seq_len > 0 && pos >= max_seq_len)) {
+            return;
+        }
+        size_t cache_idx = static_cast<size_t>(pos) * kv_stride + rem;
 
         k_cache[cache_idx] = static_cast<sycl::half>(K_in[i]);
         v_cache[cache_idx] = static_cast<sycl::half>(V_in[i]);
@@ -136,7 +152,8 @@ void sdpa_causal_cached(sycl::queue& q,
                         int64_t num_q_heads,
                         int64_t num_kv_heads,
                         int64_t head_dim,
-                        float scale) {
+                        float scale,
+                        int64_t max_seq_len) {
     if (num_q_tokens <= 0 || num_q_heads <= 0 || num_kv_heads <= 0 || head_dim <= 0) return;
 
     if (scale <= 0.0f) {
@@ -172,6 +189,10 @@ void sdpa_causal_cached(sycl::queue& q,
                 float* out_vec = out + (i * num_q_heads + h) * head_dim;
 
                 int64_t total_keys = start_pos + i + 1;
+                if (max_seq_len > 0 && total_keys > max_seq_len) {
+                    total_keys = max_seq_len;
+                }
+                if (total_keys <= 0) return;
 
                 float max_score = -std::numeric_limits<float>::infinity();
                 float sum_exp = 0.0f;
@@ -235,7 +256,8 @@ sycl::event sdpa_causal_cached_dynamic(sycl::queue& q,
                                  int64_t num_q_heads,
                                  int64_t num_kv_heads,
                                  int64_t head_dim,
-                                 float scale) {
+                                 float scale,
+                                 int64_t max_seq_len) {
     if (num_q_tokens <= 0 || num_q_heads <= 0 || num_kv_heads <= 0 || head_dim <= 0) return sycl::event{};
 
     if (scale <= 0.0f) {
@@ -271,6 +293,10 @@ sycl::event sdpa_causal_cached_dynamic(sycl::queue& q,
 
                 int64_t start_pos = *d_start_pos;
                 int64_t total_keys = start_pos + i + 1;
+                if (max_seq_len > 0 && total_keys > max_seq_len) {
+                    total_keys = max_seq_len;
+                }
+                if (total_keys <= 0) return;
 
                 float max_score = -std::numeric_limits<float>::infinity();
                 float sum_exp = 0.0f;

@@ -23,6 +23,7 @@ void sdpa_causal_naive(sycl::queue& q,
                        float scale = 0.0f);
 
 // Write computed FP32 K and V into FP16 KV cache at [start_pos, start_pos + num_tokens)
+// max_seq_len: bounds check limit (0 = unbounded)
 void attention_write_kv_cache(sycl::queue& q,
                               sycl::half* k_cache,
                               sycl::half* v_cache,
@@ -31,9 +32,11 @@ void attention_write_kv_cache(sycl::queue& q,
                               int64_t start_pos,
                               int64_t num_tokens,
                               int64_t num_kv_heads,
-                              int64_t head_dim);
+                              int64_t head_dim,
+                              int64_t max_seq_len = 0);
 
 // Dynamic device-pointer overload for command-graph capture/replay
+// max_seq_len: bounds check limit (0 = unbounded)
 sycl::event attention_write_kv_cache_dynamic(sycl::queue& q,
                                        sycl::half* k_cache,
                                        sycl::half* v_cache,
@@ -42,7 +45,8 @@ sycl::event attention_write_kv_cache_dynamic(sycl::queue& q,
                                        const int64_t* d_start_pos,
                                        int64_t num_tokens,
                                        int64_t num_kv_heads,
-                                       int64_t head_dim);
+                                       int64_t head_dim,
+                                       int64_t max_seq_len = 0);
 
 // Causal SDPA reading from FP16 KV cache (supports single-token decode and chunked prefill)
 // Q: [num_q_tokens, num_q_heads, head_dim] (float)
@@ -59,7 +63,8 @@ void sdpa_causal_cached(sycl::queue& q,
                         int64_t num_q_heads,
                         int64_t num_kv_heads,
                         int64_t head_dim,
-                        float scale = 0.0f);
+                        float scale = 0.0f,
+                        int64_t max_seq_len = 0);
 
 // Dynamic device-pointer overload for command-graph capture/replay
 sycl::event sdpa_causal_cached_dynamic(sycl::queue& q,
@@ -72,6 +77,7 @@ sycl::event sdpa_causal_cached_dynamic(sycl::queue& q,
                                  int64_t num_q_heads,
                                  int64_t num_kv_heads,
                                  int64_t head_dim,
-                                 float scale = 0.0f);
+                                 float scale = 0.0f,
+                                 int64_t max_seq_len = 0);
 
 } // namespace xinfer::ops

@@ -195,6 +195,31 @@ void test_streaming_sse_event_serialization() {
     std::cout << "  -> PASSED: Streaming SSE chunk conforms to OpenAI streaming specification." << std::endl;
 }
 
+void test_context_length_exceeded_error() {
+    std::cout << "[Test 6/6] Context length exceeded error serialization..." << std::endl;
+
+    // 1. Prompt itself exceeds max_seq_len
+    ApiError err1 = make_context_length_exceeded_error(8192, 9000, 128);
+    assert(err1.status_code == 400);
+    assert(err1.type == "invalid_request_error");
+    assert(err1.code == "context_length_exceeded");
+    assert(err1.param == "messages");
+    std::string json1 = err1.to_json();
+    assert(json1.find("\"code\":\"context_length_exceeded\"") != std::string::npos);
+    assert(json1.find("\"param\":\"messages\"") != std::string::npos);
+    assert(json1.find("9000 tokens") != std::string::npos);
+
+    // 2. Prompt + max_tokens exceeds max_seq_len
+    ApiError err2 = make_context_length_exceeded_error(8192, 8000, 500);
+    assert(err2.status_code == 400);
+    assert(err2.code == "context_length_exceeded");
+    std::string json2 = err2.to_json();
+    assert(json2.find("8500 tokens") != std::string::npos);
+    assert(json2.find("8000 in the messages, 500 in the completion") != std::string::npos);
+
+    std::cout << "  -> PASSED: context_length_exceeded matches OpenAI error schema." << std::endl;
+}
+
 int main() {
     std::cout << "==========================================================" << std::endl;
     std::cout << " xinfer Milestone 9 OpenAI Serving Protocol & Schema Test" << std::endl;
@@ -205,6 +230,7 @@ int main() {
     test_parse_invalid_requests();
     test_response_json_serialization();
     test_streaming_sse_event_serialization();
+    test_context_length_exceeded_error();
 
     std::cout << "==========================================================" << std::endl;
     std::cout << " ALL MILESTONE 9 SCHEMA TESTS PASSED!" << std::endl;

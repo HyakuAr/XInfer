@@ -95,12 +95,48 @@ public:
         return is_loaded_ && model_ != nullptr && kv_cache_ != nullptr;
     }
 
+    size_t max_seq_len() const noexcept {
+        return kv_cache_ ? kv_cache_->max_seq_len() : config_.max_seq_len;
+    }
+
+    size_t count_tokens(const std::string& text, bool apply_chat_template) const {
+        if (!tokenizer_.is_loaded()) return 0;
+        std::string input = apply_chat_template ? tokenizer_.apply_chat_template(text) : text;
+        return tokenizer_.encode(input).size();
+    }
+
+    bool validate_tokens(size_t prompt_tokens, int max_new_tokens, std::string* error_msg = nullptr) const {
+        size_t limit = max_seq_len();
+        if (prompt_tokens > limit) {
+            if (error_msg) {
+                *error_msg = "This model's maximum context length is " + std::to_string(limit) +
+                             " tokens. However, your messages resulted in " + std::to_string(prompt_tokens) +
+                             " tokens. Please reduce the length of the messages.";
+            }
+            return false;
+        }
+        if (prompt_tokens + static_cast<size_t>(std::max(0, max_new_tokens)) > limit) {
+            if (error_msg) {
+                *error_msg = "This model's maximum context length is " + std::to_string(limit) +
+                             " tokens. However, you requested " +
+                             std::to_string(prompt_tokens + static_cast<size_t>(std::max(0, max_new_tokens))) +
+                             " tokens (" + std::to_string(prompt_tokens) + " in the messages, " +
+                             std::to_string(max_new_tokens) + " in the completion). Please reduce the length of the messages or completion.";
+            }
+            return false;
+        }
+        return true;
+    }
+
     GenerationResult generate(const std::string& prompt,
                               const GenerationConfig& gen_config,
                               TokenCallback callback) {
         GenerationResult result;
         if (!is_loaded()) {
             std::cerr << "[xinfer::Engine] Error: Model is not loaded" << std::endl;
+            result.success = false;
+            result.error_code = "model_not_loaded";
+            result.error_msg = "Model is not loaded";
             return result;
         }
 
@@ -114,15 +150,34 @@ public:
         std::vector<int64_t> token_seq = tokenizer_.encode(input_text);
         if (token_seq.empty()) {
             std::cerr << "[xinfer::Engine] Error: Tokenizer produced 0 tokens" << std::endl;
+            result.success = false;
+            result.error_code = "empty_prompt";
+            result.error_msg = "Tokenizer produced 0 tokens";
             return result;
         }
 
         result.prompt_tokens = token_seq.size();
 
+        // Validate context length before any GPU-writing call
+        std::string val_err;
+        if (!validate_tokens(token_seq.size(), gen_config.max_new_tokens, &val_err)) {
+            std::cerr << "[xinfer::Engine] Error: " << val_err << std::endl;
+            result.success = false;
+            result.error_code = "context_length_exceeded";
+            result.error_msg = val_err;
+            return result;
+        }
+
         // 1. Prefill prompt (supports chunking via config_.prefill_chunk_size)
         auto t0 = std::chrono::high_resolution_clock::now();
         int64_t current_tok = targets::qwen3_8::prefill_prompt(
             ctx_, *arena_, *model_, *kv_cache_, token_seq, config_.prefill_chunk_size);
+        if (current_tok < 0) {
+            result.success = false;
+            result.error_code = "prefill_failed";
+            result.error_msg = "Prefill failed: context length exceeded";
+            return result;
+        }
 
         auto t_first = std::chrono::high_resolution_clock::now();
         result.time_to_first_token_sec = std::chrono::duration<double>(t_first - t0).count();
@@ -130,6 +185,7 @@ public:
         // Check for stop tokens on first token
         if (current_tok == gen_config.eos_token_id || current_tok == gen_config.im_end_token_id) {
             result.generated_tokens = 0;
+            result.finish_reason = "stop";
             result.total_time_sec = result.time_to_first_token_sec;
             return result;
         }
@@ -141,23 +197,45 @@ public:
         if (callback) {
             if (!callback(first_piece, current_tok)) {
                 result.generated_tokens = 1;
+                result.finish_reason = "stop";
                 result.total_time_sec = result.time_to_first_token_sec;
                 return result;
             }
         }
 
         // 2. Autoregressive single-token decode loop using persistent KV cache and captured command graph
+        result.finish_reason = "length"; // Default if max_new_tokens limit is reached
         for (int step = 1; step < gen_config.max_new_tokens; ++step) {
+            // Guard against writing past the KV cache buffer capacity
+            if (kv_cache_->current_seq_len() >= kv_cache_->max_seq_len()) {
+                std::cout << "[xinfer::Engine] Context length limit reached ("
+                          << kv_cache_->current_seq_len() << "/" << kv_cache_->max_seq_len() << ")" << std::endl;
+                result.finish_reason = "length";
+                break;
+            }
+
             int64_t next_tok = 0;
             if (decode_graph_ && decode_graph_->is_captured()) {
                 next_tok = decode_graph_->decode_step(current_tok, kv_cache_->current_seq_len());
-                kv_cache_->advance(1);
+                if (next_tok < 0) {
+                    result.finish_reason = "length";
+                    break;
+                }
+                if (!kv_cache_->advance(1)) {
+                    result.finish_reason = "length";
+                    break;
+                }
             } else {
                 next_tok = targets::qwen3_8::decode_step(
                     ctx_, *arena_, *model_, *kv_cache_, current_tok);
+                if (next_tok < 0) {
+                    result.finish_reason = "length";
+                    break;
+                }
             }
 
             if (next_tok == gen_config.eos_token_id || next_tok == gen_config.im_end_token_id) {
+                result.finish_reason = "stop";
                 break;
             }
 
@@ -167,6 +245,7 @@ public:
 
             if (callback) {
                 if (!callback(piece, next_tok)) {
+                    result.finish_reason = "stop";
                     break;
                 }
             }
@@ -219,6 +298,18 @@ bool Engine::load(const EngineConfig& config, std::string* error_msg) {
 
 bool Engine::is_loaded() const noexcept {
     return impl_->is_loaded();
+}
+
+size_t Engine::max_seq_len() const noexcept {
+    return impl_->max_seq_len();
+}
+
+size_t Engine::count_tokens(const std::string& text, bool apply_chat_template) const {
+    return impl_->count_tokens(text, apply_chat_template);
+}
+
+bool Engine::validate_tokens(size_t prompt_tokens, int max_new_tokens, std::string* error_msg) const {
+    return impl_->validate_tokens(prompt_tokens, max_new_tokens, error_msg);
 }
 
 GenerationResult Engine::generate(const std::string& prompt,

@@ -43,6 +43,12 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
                    bool zero_linear_state,
                    float* out_last_token_logits) {
     if (seq_len <= 0) return;
+    if (start_pos < 0 || start_pos + seq_len > static_cast<int64_t>(kv_cache.max_seq_len())) {
+        std::cerr << "[xinfer::qwen3_8] Error: forward_chunk bounds exceeded: start_pos="
+                  << start_pos << ", seq_len=" << seq_len << ", max_seq_len="
+                  << kv_cache.max_seq_len() << std::endl;
+        return;
+    }
     sycl::queue& q = ctx->queue();
 
     arena.reset();
@@ -132,12 +138,14 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
 
             // Write K and V into KV cache
             ops::attention_write_kv_cache(q, kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
-                                          act_k, act_v, start_pos, seq_len, 4, 256);
+                                          act_k, act_v, start_pos, seq_len, 4, 256,
+                                          static_cast<int64_t>(kv_cache.max_seq_len()));
 
             // Causal Scaled Dot-Product Attention reading from KV Cache
             ops::sdpa_causal_cached(q, act_attn_out, act_q,
                                     kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
-                                    start_pos, seq_len, 24, 4, 256);
+                                    start_pos, seq_len, 24, 4, 256, 0.0f,
+                                    static_cast<int64_t>(kv_cache.max_seq_len()));
 
             // Output gating: attn_out *= sigmoid(gate)
             q.parallel_for(sycl::range<2>(seq_len, 24), [=](sycl::id<2> idx) {
@@ -241,6 +249,11 @@ int64_t prefill_prompt(std::shared_ptr<core::DeviceContext> ctx,
                        const std::vector<int64_t>& prompt_tokens,
                        size_t chunk_size) {
     if (prompt_tokens.empty()) return 0;
+    if (prompt_tokens.size() > kv_cache.max_seq_len()) {
+        std::cerr << "[xinfer::qwen3_8] Error: Prompt tokens (" << prompt_tokens.size()
+                  << ") exceeds KV cache max_seq_len (" << kv_cache.max_seq_len() << ")" << std::endl;
+        return -1;
+    }
     if (chunk_size == 0) chunk_size = 512;
 
     kv_cache.clear();
@@ -278,6 +291,13 @@ int64_t decode_step(std::shared_ptr<core::DeviceContext> ctx,
                     const qwen3_8_27b::LoadedModel& model,
                     core::KVCache& kv_cache,
                     int64_t input_token_id) {
+    if (kv_cache.current_seq_len() >= kv_cache.max_seq_len()) {
+        std::cerr << "[xinfer::qwen3_8] Error: decode_step called with current_seq_len ("
+                  << kv_cache.current_seq_len() << ") >= max_seq_len ("
+                  << kv_cache.max_seq_len() << ")" << std::endl;
+        return -1;
+    }
+
     constexpr int64_t vocab_size = 248320;
     float* d_logits = static_cast<float*>(arena.allocate(vocab_size * sizeof(float)));
 
@@ -291,7 +311,9 @@ int64_t decode_step(std::shared_ptr<core::DeviceContext> ctx,
                   false,
                   d_logits);
 
-    kv_cache.advance(1);
+    if (!kv_cache.advance(1)) {
+        return -1;
+    }
 
     // Greedy argmax
     int64_t next_token = ops::argmax(ctx->queue(), d_logits, vocab_size);
@@ -302,7 +324,9 @@ int64_t forward_next_token(std::shared_ptr<core::DeviceContext> ctx,
                            core::DeviceArena& arena,
                            const qwen3_8_27b::LoadedModel& model,
                            const std::vector<int64_t>& token_ids) {
-    core::KVCache temp_cache(ctx);
+    core::KVCacheConfig cfg;
+    cfg.max_seq_len = std::max<size_t>(8192, token_ids.size() + 1);
+    core::KVCache temp_cache(ctx, cfg);
     temp_cache.allocate();
     return prefill_prompt(ctx, arena, model, temp_cache, token_ids, token_ids.size());
 }

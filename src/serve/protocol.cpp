@@ -401,11 +401,36 @@ std::string ApiError::to_json() const {
     escape_json_string(out, message);
     out += ",\"type\":";
     escape_json_string(out, type);
-    out += ",\"param\":null";
+    out += ",\"param\":";
+    if (param.empty()) {
+        out += "null";
+    } else {
+        escape_json_string(out, param);
+    }
     out += ",\"code\":";
     escape_json_string(out, code);
     out += "}}";
     return out;
+}
+
+ApiError make_context_length_exceeded_error(size_t max_seq_len, size_t prompt_tokens, int max_new_tokens) {
+    ApiError err;
+    err.status_code = 400;
+    err.type = "invalid_request_error";
+    err.code = "context_length_exceeded";
+    err.param = "messages";
+    if (prompt_tokens > max_seq_len) {
+        err.message = "This model's maximum context length is " + std::to_string(max_seq_len) +
+                      " tokens. However, your messages resulted in " + std::to_string(prompt_tokens) +
+                      " tokens. Please reduce the length of the messages.";
+    } else {
+        size_t total_requested = prompt_tokens + static_cast<size_t>(std::max(0, max_new_tokens));
+        err.message = "This model's maximum context length is " + std::to_string(max_seq_len) +
+                      " tokens. However, you requested " + std::to_string(total_requested) +
+                      " tokens (" + std::to_string(prompt_tokens) + " in the messages, " +
+                      std::to_string(max_new_tokens) + " in the completion). Please reduce the length of the messages or completion.";
+    }
+    return err;
 }
 
 bool parse_chat_completion_request(std::string_view json_str,

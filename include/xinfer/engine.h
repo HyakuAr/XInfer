@@ -35,6 +35,10 @@ struct GenerationResult {
     double               time_to_first_token_sec{0.0};
     double               decode_tokens_per_sec{0.0};
     double               total_time_sec{0.0};
+    std::string          finish_reason{"stop"}; // "stop" or "length"
+    bool                 success{true};
+    std::string          error_msg;
+    std::string          error_code;
 };
 
 // Public Engine interface (PIMPL pattern per AGENTS.md §4)
@@ -54,6 +58,15 @@ public:
 
     // Query if model is loaded and ready for inference
     bool is_loaded() const noexcept;
+
+    // Query maximum sequence length supported by the model/KV cache
+    size_t max_seq_len() const noexcept;
+
+    // Tokenize text and return token count without generating
+    size_t count_tokens(const std::string& text, bool apply_chat_template = true) const;
+
+    // Validate if prompt tokens and generation config fit within max_seq_len
+    bool validate_tokens(size_t prompt_tokens, int max_new_tokens, std::string* error_msg = nullptr) const;
 
     // Execute end-to-end single-request generation (prompt -> tokens -> detokenize)
     GenerationResult generate(const std::string& prompt,

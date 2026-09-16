@@ -341,6 +341,23 @@ void HttpServer::handle_client(uintptr_t client_socket) {
     gen_cfg.temperature = req.temperature;
     gen_cfg.apply_chat_template = false; // already formatted via format_prompt()
 
+    // Validate prompt tokens and max_tokens against model context length
+    size_t prompt_tokens = engine_.count_tokens(prompt, false);
+    std::string context_err;
+    if (!engine_.validate_tokens(prompt_tokens, req.max_tokens, &context_err)) {
+        ApiError err = make_context_length_exceeded_error(engine_.max_seq_len(), prompt_tokens, req.max_tokens);
+        std::string err_body = err.to_json();
+        std::string resp =
+            "HTTP/1.1 400 Bad Request\r\n"
+            "Content-Type: application/json\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Content-Length: " + std::to_string(err_body.size()) + "\r\n"
+            "Connection: close\r\n\r\n" + err_body;
+        send_string(sock, resp);
+        CLOSE_SOCKET(sock);
+        return;
+    }
+
     std::string req_id = generate_completion_id();
     int64_t created_ts = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -351,6 +368,23 @@ void HttpServer::handle_client(uintptr_t client_socket) {
     if (!req.stream) {
         // --- Non-Streaming Response ---
         auto result = engine_.generate(prompt, gen_cfg);
+        if (!result.success) {
+            ApiError err;
+            err.status_code = 400;
+            err.type = "invalid_request_error";
+            err.code = result.error_code.empty() ? "bad_request" : result.error_code;
+            err.message = result.error_msg;
+            std::string err_body = err.to_json();
+            std::string http_resp =
+                "HTTP/1.1 400 Bad Request\r\n"
+                "Content-Type: application/json\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
+                "Content-Length: " + std::to_string(err_body.size()) + "\r\n"
+                "Connection: close\r\n\r\n" + err_body;
+            send_string(sock, http_resp);
+            CLOSE_SOCKET(sock);
+            return;
+        }
 
         ChatCompletionResponse resp;
         resp.id = req_id;
@@ -361,7 +395,7 @@ void HttpServer::handle_client(uintptr_t client_socket) {
         choice.index = 0;
         choice.message.role = "assistant";
         choice.message.content = result.text;
-        choice.finish_reason = "stop";
+        choice.finish_reason = result.finish_reason;
         resp.choices.push_back(std::move(choice));
 
         resp.usage.prompt_tokens = result.prompt_tokens;
@@ -412,7 +446,7 @@ void HttpServer::handle_client(uintptr_t client_socket) {
             return send_string(sock, chunk.to_sse_event());
         };
 
-        engine_.generate(prompt, gen_cfg, token_callback);
+        auto result = engine_.generate(prompt, gen_cfg, token_callback);
 
         // Final finish_reason chunk
         ChatCompletionChunk finish_chunk;
@@ -421,7 +455,7 @@ void HttpServer::handle_client(uintptr_t client_socket) {
         finish_chunk.model = config_.model_id;
         ChunkChoice fin_choice;
         fin_choice.index = 0;
-        fin_choice.finish_reason = "stop";
+        fin_choice.finish_reason = result.finish_reason;
         finish_chunk.choices.push_back(std::move(fin_choice));
         send_string(sock, finish_chunk.to_sse_event());
 

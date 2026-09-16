@@ -95,9 +95,13 @@ struct ApiError {
     std::string message;
     std::string type{"invalid_request_error"};
     std::string code{"bad_request"};
+    std::string param;
 
     std::string to_json() const;
 };
+
+// Creates standard OpenAI context_length_exceeded error
+ApiError make_context_length_exceeded_error(size_t max_seq_len, size_t prompt_tokens, int max_new_tokens);
 
 // High-level request parser
 bool parse_chat_completion_request(std::string_view json_str,

@@ -58,10 +58,21 @@ public:
     const float* conv_state(size_t linear_layer_idx) const noexcept;
 
     size_t current_seq_len() const noexcept { return current_seq_len_; }
-    void set_seq_len(size_t len) noexcept { current_seq_len_ = len; }
-    void advance(size_t delta) noexcept { current_seq_len_ += delta; }
+    void set_seq_len(size_t len) noexcept { current_seq_len_ = std::min(len, config_.max_seq_len); }
+    bool advance(size_t delta) noexcept {
+        if (current_seq_len_ + delta > config_.max_seq_len) {
+            current_seq_len_ = config_.max_seq_len;
+            return false;
+        }
+        current_seq_len_ += delta;
+        return true;
+    }
 
     const KVCacheConfig& config() const noexcept { return config_; }
+    size_t max_seq_len() const noexcept { return config_.max_seq_len; }
+    bool can_advance(size_t delta = 1) const noexcept {
+        return current_seq_len_ + delta <= config_.max_seq_len;
+    }
     size_t total_allocated_bytes() const noexcept;
 
 private:

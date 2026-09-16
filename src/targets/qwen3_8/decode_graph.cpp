@@ -159,11 +159,13 @@ bool DecodeGraph::capture() {
 
                 // Use d_positions_ as dynamic device pointer for KV-cache write and SDPA
                 ops::attention_write_kv_cache_dynamic(q, kv_cache_.k_cache(full_idx), kv_cache_.v_cache(full_idx),
-                                                      act_k_, act_v_, d_positions_, 1, 4, 256);
+                                                      act_k_, act_v_, d_positions_, 1, 4, 256,
+                                                      static_cast<int64_t>(kv_cache_.max_seq_len()));
 
                 ops::sdpa_causal_cached_dynamic(q, act_attn_out_, act_q_,
                                                 kv_cache_.k_cache(full_idx), kv_cache_.v_cache(full_idx),
-                                                d_positions_, 1, 24, 4, 256);
+                                                d_positions_, 1, 24, 4, 256, 0.0f,
+                                                static_cast<int64_t>(kv_cache_.max_seq_len()));
 
                 q.parallel_for(sycl::range<2>(1, 24), [=](sycl::id<2> idx) {
                     int64_t t = idx[0];
@@ -260,6 +262,12 @@ bool DecodeGraph::capture() {
 int64_t DecodeGraph::decode_step(int64_t input_token_id, size_t cur_pos) {
     if (!is_captured_ || !exec_graph_) {
         throw std::runtime_error("DecodeGraph::decode_step called before successful graph capture");
+    }
+
+    if (cur_pos >= kv_cache_.max_seq_len()) {
+        std::cerr << "[DecodeGraph] Error: cur_pos (" << cur_pos
+                  << ") exceeds KV cache max_seq_len (" << kv_cache_.max_seq_len() << ")" << std::endl;
+        return -1;
     }
 
     sycl::queue& q = ctx_->queue();
