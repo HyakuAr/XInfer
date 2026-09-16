@@ -3,9 +3,28 @@
 
 namespace xinfer::ops {
 
-void swiglu(sycl::queue& q, float* out, const float* gate, const float* up, int64_t num_elements) {
-    if (num_elements <= 0) return;
-    q.parallel_for(sycl::range<1>(static_cast<size_t>(num_elements)), [=](sycl::id<1> idx) {
+sycl::event swiglu(sycl::queue& q, float* out, const float* gate, const float* up, int64_t num_elements) {
+    if (num_elements <= 0) return sycl::event{};
+    if (num_elements % 4 == 0) {
+        size_t n_vec = static_cast<size_t>(num_elements / 4);
+        const auto* gate_v = reinterpret_cast<const sycl::vec<float, 4>*>(gate);
+        const auto* up_v   = reinterpret_cast<const sycl::vec<float, 4>*>(up);
+        auto* out_v        = reinterpret_cast<sycl::vec<float, 4>*>(out);
+
+        return q.parallel_for(sycl::range<1>(n_vec), [=](sycl::id<1> idx) {
+            size_t i = idx[0];
+            sycl::vec<float, 4> g = gate_v[i];
+            sycl::vec<float, 4> u = up_v[i];
+            sycl::vec<float, 4> res;
+            #pragma unroll
+            for (int k = 0; k < 4; ++k) {
+                float val = g[k];
+                res[k] = (val / (1.0f + sycl::exp(-val))) * u[k];
+            }
+            out_v[i] = res;
+        });
+    }
+    return q.parallel_for(sycl::range<1>(static_cast<size_t>(num_elements)), [=](sycl::id<1> idx) {
         int64_t i = idx[0];
         float g = gate[i];
         float silu_g = g / (1.0f + sycl::exp(-g));
@@ -13,34 +32,83 @@ void swiglu(sycl::queue& q, float* out, const float* gate, const float* up, int6
     });
 }
 
-void silu(sycl::queue& q, float* out, const float* in, int64_t num_elements) {
-    if (num_elements <= 0) return;
-    q.parallel_for(sycl::range<1>(static_cast<size_t>(num_elements)), [=](sycl::id<1> idx) {
+sycl::event silu(sycl::queue& q, float* out, const float* in, int64_t num_elements) {
+    if (num_elements <= 0) return sycl::event{};
+    if (num_elements % 4 == 0) {
+        size_t n_vec = static_cast<size_t>(num_elements / 4);
+        const auto* in_v = reinterpret_cast<const sycl::vec<float, 4>*>(in);
+        auto* out_v      = reinterpret_cast<sycl::vec<float, 4>*>(out);
+
+        return q.parallel_for(sycl::range<1>(n_vec), [=](sycl::id<1> idx) {
+            size_t i = idx[0];
+            sycl::vec<float, 4> x = in_v[i];
+            sycl::vec<float, 4> res;
+            #pragma unroll
+            for (int k = 0; k < 4; ++k) {
+                float val = x[k];
+                res[k] = val / (1.0f + sycl::exp(-val));
+            }
+            out_v[i] = res;
+        });
+    }
+    return q.parallel_for(sycl::range<1>(static_cast<size_t>(num_elements)), [=](sycl::id<1> idx) {
         int64_t i = idx[0];
         float x = in[i];
         out[i] = x / (1.0f + sycl::exp(-x));
     });
 }
 
-void add(sycl::queue& q, float* out, const float* a, const float* b, int64_t num_elements) {
-    if (num_elements <= 0) return;
-    q.parallel_for(sycl::range<1>(static_cast<size_t>(num_elements)), [=](sycl::id<1> idx) {
+sycl::event add(sycl::queue& q, float* out, const float* a, const float* b, int64_t num_elements) {
+    if (num_elements <= 0) return sycl::event{};
+    if (num_elements % 4 == 0) {
+        size_t n_vec = static_cast<size_t>(num_elements / 4);
+        const auto* a_v = reinterpret_cast<const sycl::vec<float, 4>*>(a);
+        const auto* b_v = reinterpret_cast<const sycl::vec<float, 4>*>(b);
+        auto* out_v     = reinterpret_cast<sycl::vec<float, 4>*>(out);
+
+        return q.parallel_for(sycl::range<1>(n_vec), [=](sycl::id<1> idx) {
+            size_t i = idx[0];
+            out_v[i] = a_v[i] + b_v[i];
+        });
+    }
+    return q.parallel_for(sycl::range<1>(static_cast<size_t>(num_elements)), [=](sycl::id<1> idx) {
         int64_t i = idx[0];
         out[i] = a[i] + b[i];
     });
 }
 
-void add_inplace(sycl::queue& q, float* a, const float* b, int64_t num_elements) {
-    if (num_elements <= 0) return;
-    q.parallel_for(sycl::range<1>(static_cast<size_t>(num_elements)), [=](sycl::id<1> idx) {
+sycl::event add_inplace(sycl::queue& q, float* a, const float* b, int64_t num_elements) {
+    if (num_elements <= 0) return sycl::event{};
+    if (num_elements % 4 == 0) {
+        size_t n_vec = static_cast<size_t>(num_elements / 4);
+        auto* a_v       = reinterpret_cast<sycl::vec<float, 4>*>(a);
+        const auto* b_v = reinterpret_cast<const sycl::vec<float, 4>*>(b);
+
+        return q.parallel_for(sycl::range<1>(n_vec), [=](sycl::id<1> idx) {
+            size_t i = idx[0];
+            a_v[i] += b_v[i];
+        });
+    }
+    return q.parallel_for(sycl::range<1>(static_cast<size_t>(num_elements)), [=](sycl::id<1> idx) {
         int64_t i = idx[0];
         a[i] += b[i];
     });
 }
 
-void mul(sycl::queue& q, float* out, const float* a, const float* b, int64_t num_elements) {
-    if (num_elements <= 0) return;
-    q.parallel_for(sycl::range<1>(static_cast<size_t>(num_elements)), [=](sycl::id<1> idx) {
+sycl::event mul(sycl::queue& q, float* out, const float* a, const float* b, int64_t num_elements) {
+    if (num_elements <= 0) return sycl::event{};
+    if (num_elements % 4 == 0) {
+        size_t n_vec = static_cast<size_t>(num_elements / 4);
+        const auto* a_v = reinterpret_cast<const sycl::vec<float, 4>*>(a);
+        const auto* b_v = reinterpret_cast<const sycl::vec<float, 4>*>(b);
+        auto* out_v     = reinterpret_cast<sycl::vec<float, 4>*>(out);
+
+        return q.parallel_for(sycl::range<1>(n_vec), [=](sycl::id<1> idx) {
+            size_t i = idx[0];
+            out_v[i] = a_v[i] * b_v[i];
+        });
+    }
+    return q.parallel_for(sycl::range<1>(static_cast<size_t>(num_elements)), [=](sycl::id<1> idx) {
         int64_t i = idx[0];
         out[i] = a[i] * b[i];
     });

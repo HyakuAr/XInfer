@@ -12,15 +12,15 @@
 
 namespace xinfer::targets::qwen3_8 {
 
-void embed_tokens_lookup(sycl::queue& q,
-                         float* out_act,
-                         const void* embed_table_bf16,
-                         const int64_t* d_token_ids,
-                         int64_t num_tokens,
-                         int64_t hidden_size) {
+sycl::event embed_tokens_lookup(sycl::queue& q,
+                                 float* out_act,
+                                 const void* embed_table_bf16,
+                                 const int64_t* d_token_ids,
+                                 int64_t num_tokens,
+                                 int64_t hidden_size) {
     const uint16_t* table = static_cast<const uint16_t*>(embed_table_bf16);
 
-    q.parallel_for(sycl::range<2>(num_tokens, hidden_size), [=](sycl::id<2> idx) {
+    return q.parallel_for(sycl::range<2>(num_tokens, hidden_size), [=](sycl::id<2> idx) {
         int64_t t = idx[0];
         int64_t d = idx[1];
         int64_t token_id = d_token_ids[t];

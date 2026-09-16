@@ -100,20 +100,20 @@ void attention_write_kv_cache(sycl::queue& q,
     });
 }
 
-void attention_write_kv_cache_dynamic(sycl::queue& q,
-                                      sycl::half* k_cache,
-                                      sycl::half* v_cache,
-                                      const float* K_in,
-                                      const float* V_in,
-                                      const int64_t* d_start_pos,
-                                      int64_t num_tokens,
-                                      int64_t num_kv_heads,
-                                      int64_t head_dim) {
-    if (num_tokens <= 0 || num_kv_heads <= 0 || head_dim <= 0) return;
+sycl::event attention_write_kv_cache_dynamic(sycl::queue& q,
+                                       sycl::half* k_cache,
+                                       sycl::half* v_cache,
+                                       const float* K_in,
+                                       const float* V_in,
+                                       const int64_t* d_start_pos,
+                                       int64_t num_tokens,
+                                       int64_t num_kv_heads,
+                                       int64_t head_dim) {
+    if (num_tokens <= 0 || num_kv_heads <= 0 || head_dim <= 0) return sycl::event{};
     int64_t kv_stride = num_kv_heads * head_dim;
     size_t total_elements = static_cast<size_t>(num_tokens * kv_stride);
 
-    q.parallel_for(sycl::range<1>(total_elements), [=](sycl::id<1> idx) {
+    return q.parallel_for(sycl::range<1>(total_elements), [=](sycl::id<1> idx) {
         size_t i = idx[0];
         size_t t = i / kv_stride;
         size_t rem = i % kv_stride;
@@ -176,6 +176,13 @@ void sdpa_causal_cached(sycl::queue& q,
                 float max_score = -std::numeric_limits<float>::infinity();
                 float sum_exp = 0.0f;
 
+                // Query vector cached in registers (up to 16 elements per lane for head_dim <= 256)
+                float q_reg[16];
+                for (size_t d = 0; d < elems_per_lane; ++d) {
+                    size_t idx = lane * elems_per_lane + d;
+                    q_reg[d] = q_vec[idx];
+                }
+
                 // Accumulator in registers (up to 16 elements per lane for head_dim <= 256)
                 float lane_out[16] = {0.0f};
 
@@ -187,7 +194,7 @@ void sdpa_causal_cached(sycl::queue& q,
                     float lane_dot = 0.0f;
                     for (size_t d = 0; d < elems_per_lane; ++d) {
                         size_t idx = lane * elems_per_lane + d;
-                        lane_dot += q_vec[idx] * static_cast<float>(k_ptr[idx]);
+                        lane_dot += q_reg[d] * static_cast<float>(k_ptr[idx]);
                     }
                     float dot = sycl::reduce_over_group(sg, lane_dot, sycl::plus<float>());
                     float score = dot * scale;
@@ -218,18 +225,18 @@ void sdpa_causal_cached(sycl::queue& q,
 }
 
 // Dynamic device-pointer overload for command-graph capture/replay
-void sdpa_causal_cached_dynamic(sycl::queue& q,
-                                float* out,
-                                const float* Q,
-                                const sycl::half* k_cache,
-                                const sycl::half* v_cache,
-                                const int64_t* d_start_pos,
-                                int64_t num_q_tokens,
-                                int64_t num_q_heads,
-                                int64_t num_kv_heads,
-                                int64_t head_dim,
-                                float scale) {
-    if (num_q_tokens <= 0 || num_q_heads <= 0 || num_kv_heads <= 0 || head_dim <= 0) return;
+sycl::event sdpa_causal_cached_dynamic(sycl::queue& q,
+                                 float* out,
+                                 const float* Q,
+                                 const sycl::half* k_cache,
+                                 const sycl::half* v_cache,
+                                 const int64_t* d_start_pos,
+                                 int64_t num_q_tokens,
+                                 int64_t num_q_heads,
+                                 int64_t num_kv_heads,
+                                 int64_t head_dim,
+                                 float scale) {
+    if (num_q_tokens <= 0 || num_q_heads <= 0 || num_kv_heads <= 0 || head_dim <= 0) return sycl::event{};
 
     if (scale <= 0.0f) {
         scale = 1.0f / sycl::sqrt(static_cast<float>(head_dim));
@@ -246,7 +253,7 @@ void sdpa_causal_cached_dynamic(sycl::queue& q,
 
     size_t elems_per_lane = static_cast<size_t>(head_dim) / SG_SIZE;
 
-    q.submit([&](sycl::handler& cgh) {
+    return q.submit([&](sycl::handler& cgh) {
         cgh.parallel_for(
             sycl::nd_range<1>(padded_global, WG_SIZE),
             [=](sycl::nd_item<1> item) [[sycl::reqd_sub_group_size(SG_SIZE)]] {
@@ -268,6 +275,13 @@ void sdpa_causal_cached_dynamic(sycl::queue& q,
                 float max_score = -std::numeric_limits<float>::infinity();
                 float sum_exp = 0.0f;
 
+                // Query vector cached in registers (up to 16 elements per lane for head_dim <= 256)
+                float q_reg[16];
+                for (size_t d = 0; d < elems_per_lane; ++d) {
+                    size_t idx = lane * elems_per_lane + d;
+                    q_reg[d] = q_vec[idx];
+                }
+
                 float lane_out[16] = {0.0f};
 
                 for (int64_t j = 0; j < total_keys; ++j) {
@@ -277,7 +291,7 @@ void sdpa_causal_cached_dynamic(sycl::queue& q,
                     float lane_dot = 0.0f;
                     for (size_t d = 0; d < elems_per_lane; ++d) {
                         size_t idx = lane * elems_per_lane + d;
-                        lane_dot += q_vec[idx] * static_cast<float>(k_ptr[idx]);
+                        lane_dot += q_reg[d] * static_cast<float>(k_ptr[idx]);
                     }
                     float dot = sycl::reduce_over_group(sg, lane_dot, sycl::plus<float>());
                     float score = dot * scale;

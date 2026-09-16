@@ -1,0 +1,332 @@
+#include "core/device.h"
+#include "targets/qwen3_8_27b/weights.h"
+#include "artifact/reader.h"
+#include "ops/linear.h"
+
+#include <sycl/sycl.hpp>
+#include <iostream>
+#include <iomanip>
+#include <vector>
+#include <string>
+#include <numeric>
+
+using namespace xinfer;
+
+struct ProjectionMetrics {
+    std::string name;
+    int64_t N{0};
+    int64_t K{0};
+    int count{0};
+    std::vector<sycl::event> events;
+
+    double total_time_ms{0.0};
+    size_t weight_bytes{0};
+    size_t scale_bytes{0};
+    size_t act_bytes{0};
+    size_t total_bytes{0};
+    double achieved_bw_gbs{0.0};
+};
+
+int main(int argc, char** argv) {
+    std::cout << "==================================================================" << std::endl;
+    std::cout << "  xInfer INT4 Linear GEMV Per-Projection Bandwidth Profiler        " << std::endl;
+    std::cout << "==================================================================" << std::endl;
+
+    std::string artifact_path = (argc > 1) ? argv[1] : "out/qwen3_8_27b.xinfer";
+    auto ctx = core::DeviceContext::create(true);
+    sycl::queue& q = ctx->queue();
+
+    std::cout << "Loading model artifact: " << artifact_path << " ..." << std::endl;
+    artifact::ArtifactReader reader;
+    if (!reader.open(artifact_path)) {
+        std::cerr << "Failed to open artifact: " << artifact_path << std::endl;
+        return 1;
+    }
+
+    std::string err;
+    auto model = targets::qwen3_8_27b::LoadedModel::load_from_artifact(ctx, reader, &err);
+    if (!model) {
+        std::cerr << "Failed to load model: " << err << std::endl;
+        return 1;
+    }
+
+    constexpr int64_t vocab_size = 248320;
+    constexpr int64_t hidden_size = 5120;
+    constexpr int64_t intermediate_size = 17408;
+
+    // Allocate activation buffers
+    float* act_x        = sycl::malloc_device<float>(hidden_size, q);
+    float* act_normed   = sycl::malloc_device<float>(hidden_size, q);
+    float* act_proj_out = sycl::malloc_device<float>(hidden_size, q);
+    float* act_mlp_gate = sycl::malloc_device<float>(intermediate_size, q);
+    float* act_mlp_up   = sycl::malloc_device<float>(intermediate_size, q);
+
+    float* act_q_gate   = sycl::malloc_device<float>(12288, q);
+    float* act_k        = sycl::malloc_device<float>(1024, q);
+    float* act_v        = sycl::malloc_device<float>(1024, q);
+    float* act_attn_out = sycl::malloc_device<float>(6144, q);
+
+    float* act_qkv_raw   = sycl::malloc_device<float>(10240, q);
+    float* act_z         = sycl::malloc_device<float>(6144, q);
+    float* act_b         = sycl::malloc_device<float>(48, q);
+    float* act_a         = sycl::malloc_device<float>(48, q);
+    float* act_delta_out = sycl::malloc_device<float>(6144, q);
+    float* d_logits      = sycl::malloc_device<float>(vocab_size, q);
+
+    q.memset(act_x, 0, hidden_size * sizeof(float)).wait();
+    q.memset(act_normed, 0, hidden_size * sizeof(float)).wait();
+
+    enum ProjType {
+        P_MLP_GATE = 0,
+        P_MLP_UP,
+        P_MLP_DOWN,
+        P_FA_Q,
+        P_FA_K,
+        P_FA_V,
+        P_FA_OUT,
+        P_LA_QKV,
+        P_LA_Z,
+        P_LA_B,
+        P_LA_A,
+        P_LA_OUT,
+        P_LM_HEAD,
+        NUM_PROJ_TYPES
+    };
+
+    std::vector<ProjectionMetrics> projs(NUM_PROJ_TYPES);
+    projs[P_MLP_GATE]   = {"MLP Gate",           intermediate_size, hidden_size, 64, {}};
+    projs[P_MLP_UP]     = {"MLP Up",             intermediate_size, hidden_size, 64, {}};
+    projs[P_MLP_DOWN]   = {"MLP Down",           hidden_size, intermediate_size, 64, {}};
+    projs[P_FA_Q]       = {"Full-Attn Q",        12288, hidden_size, 16, {}};
+    projs[P_FA_K]       = {"Full-Attn K",        1024,  hidden_size, 16, {}};
+    projs[P_FA_V]       = {"Full-Attn V",        1024,  hidden_size, 16, {}};
+    projs[P_FA_OUT]     = {"Full-Attn Out",      hidden_size, 6144, 16, {}};
+    projs[P_LA_QKV]     = {"Linear-Attn QKV",    10240, hidden_size, 48, {}};
+    projs[P_LA_Z]       = {"Linear-Attn Z",      6144,  hidden_size, 48, {}};
+    projs[P_LA_B]       = {"Linear-Attn B",      48,    hidden_size, 48, {}};
+    projs[P_LA_A]       = {"Linear-Attn A",      48,    hidden_size, 48, {}};
+    projs[P_LA_OUT]     = {"Linear-Attn Out",    hidden_size, 6144, 48, {}};
+    projs[P_LM_HEAD]    = {"LM Head",            vocab_size, hidden_size, 1, {}};
+
+    for (auto& p : projs) {
+        p.events.reserve(p.count);
+    }
+
+    // Warmup
+    {
+        ops::linear_int4(q, act_mlp_gate, act_normed,
+                         static_cast<const uint8_t*>(model->layers()[0].gate_proj.d_weights_int4),
+                         static_cast<const sycl::half*>(model->layers()[0].gate_proj.d_scales),
+                         nullptr, 1, intermediate_size, hidden_size);
+        q.wait();
+    }
+
+    std::cout << "Profiling all 497 INT4 linear projections across all 64 layers..." << std::endl;
+
+    q.wait();
+    const auto& layers = model->layers();
+
+    for (size_t l = 0; l < layers.size(); ++l) {
+        const auto& layer = layers[l];
+
+        if (layer.layer_type == "full_attention") {
+            // Q proj
+            projs[P_FA_Q].events.push_back(
+                ops::linear_int4(q, act_q_gate, act_normed,
+                                 static_cast<const uint8_t*>(layer.q_proj.d_weights_int4),
+                                 static_cast<const sycl::half*>(layer.q_proj.d_scales),
+                                 nullptr, 1, 12288, hidden_size)
+            );
+            // K proj
+            projs[P_FA_K].events.push_back(
+                ops::linear_int4(q, act_k, act_normed,
+                                 static_cast<const uint8_t*>(layer.k_proj.d_weights_int4),
+                                 static_cast<const sycl::half*>(layer.k_proj.d_scales),
+                                 nullptr, 1, 1024, hidden_size)
+            );
+            // V proj
+            projs[P_FA_V].events.push_back(
+                ops::linear_int4(q, act_v, act_normed,
+                                 static_cast<const uint8_t*>(layer.v_proj.d_weights_int4),
+                                 static_cast<const sycl::half*>(layer.v_proj.d_scales),
+                                 nullptr, 1, 1024, hidden_size)
+            );
+            // Out proj
+            projs[P_FA_OUT].events.push_back(
+                ops::linear_int4(q, act_proj_out, act_attn_out,
+                                 static_cast<const uint8_t*>(layer.o_proj.d_weights_int4),
+                                 static_cast<const sycl::half*>(layer.o_proj.d_scales),
+                                 nullptr, 1, hidden_size, 6144)
+            );
+        } else {
+            // QKV proj
+            projs[P_LA_QKV].events.push_back(
+                ops::linear_int4(q, act_qkv_raw, act_normed,
+                                 static_cast<const uint8_t*>(layer.in_proj_qkv.d_weights_int4),
+                                 static_cast<const sycl::half*>(layer.in_proj_qkv.d_scales),
+                                 nullptr, 1, 10240, hidden_size)
+            );
+            // Z proj
+            projs[P_LA_Z].events.push_back(
+                ops::linear_int4(q, act_z, act_normed,
+                                 static_cast<const uint8_t*>(layer.in_proj_z.d_weights_int4),
+                                 static_cast<const sycl::half*>(layer.in_proj_z.d_scales),
+                                 nullptr, 1, 6144, hidden_size)
+            );
+            // B proj
+            projs[P_LA_B].events.push_back(
+                ops::linear_int4(q, act_b, act_normed,
+                                 static_cast<const uint8_t*>(layer.in_proj_b.d_weights_int4),
+                                 static_cast<const sycl::half*>(layer.in_proj_b.d_scales),
+                                 nullptr, 1, 48, hidden_size)
+            );
+            // A proj
+            projs[P_LA_A].events.push_back(
+                ops::linear_int4(q, act_a, act_normed,
+                                 static_cast<const uint8_t*>(layer.in_proj_a.d_weights_int4),
+                                 static_cast<const sycl::half*>(layer.in_proj_a.d_scales),
+                                 nullptr, 1, 48, hidden_size)
+            );
+            // Out proj
+            projs[P_LA_OUT].events.push_back(
+                ops::linear_int4(q, act_proj_out, act_delta_out,
+                                 static_cast<const uint8_t*>(layer.out_proj.d_weights_int4),
+                                 static_cast<const sycl::half*>(layer.out_proj.d_scales),
+                                 nullptr, 1, hidden_size, 6144)
+            );
+        }
+
+        // MLP Gate
+        projs[P_MLP_GATE].events.push_back(
+            ops::linear_int4(q, act_mlp_gate, act_normed,
+                             static_cast<const uint8_t*>(layer.gate_proj.d_weights_int4),
+                             static_cast<const sycl::half*>(layer.gate_proj.d_scales),
+                             nullptr, 1, intermediate_size, hidden_size)
+        );
+        // MLP Up
+        projs[P_MLP_UP].events.push_back(
+            ops::linear_int4(q, act_mlp_up, act_normed,
+                             static_cast<const uint8_t*>(layer.up_proj.d_weights_int4),
+                             static_cast<const sycl::half*>(layer.up_proj.d_scales),
+                             nullptr, 1, intermediate_size, hidden_size)
+        );
+        // MLP Down
+        projs[P_MLP_DOWN].events.push_back(
+            ops::linear_int4(q, act_proj_out, act_mlp_gate,
+                             static_cast<const uint8_t*>(layer.down_proj.d_weights_int4),
+                             static_cast<const sycl::half*>(layer.down_proj.d_scales),
+                             nullptr, 1, hidden_size, intermediate_size)
+        );
+    }
+
+    // LM Head
+    const auto& lm_head = model->lm_head();
+    projs[P_LM_HEAD].events.push_back(
+        ops::linear_int4(q, d_logits, act_normed,
+                         static_cast<const uint8_t*>(lm_head.d_weights_int4),
+                         static_cast<const sycl::half*>(lm_head.d_scales),
+                         nullptr, 1, vocab_size, hidden_size)
+    );
+
+    q.wait();
+
+    double grand_total_time_ms = 0.0;
+    size_t grand_total_bytes = 0;
+    size_t grand_total_weight_bytes = 0;
+
+    for (auto& p : projs) {
+        double dur_ms = 0.0;
+        for (auto& ev : p.events) {
+            uint64_t s = ev.get_profiling_info<sycl::info::event_profiling::command_start>();
+            uint64_t e = ev.get_profiling_info<sycl::info::event_profiling::command_end>();
+            dur_ms += static_cast<double>(e - s) * 1e-6;
+        }
+        p.total_time_ms = dur_ms;
+        grand_total_time_ms += dur_ms;
+
+        // Bytes calculations
+        size_t w_bytes_per_op = static_cast<size_t>(p.N) * (p.K / 2);
+        size_t s_bytes_per_op = static_cast<size_t>(p.N) * (p.K / 128) * sizeof(sycl::half);
+        size_t in_act_per_op  = static_cast<size_t>(p.K) * sizeof(float);
+        size_t out_act_per_op = static_cast<size_t>(p.N) * sizeof(float);
+
+        p.weight_bytes = w_bytes_per_op * p.count;
+        p.scale_bytes  = s_bytes_per_op * p.count;
+        p.act_bytes    = (in_act_per_op + out_act_per_op) * p.count;
+        p.total_bytes  = p.weight_bytes + p.scale_bytes + p.act_bytes;
+
+        grand_total_bytes += p.total_bytes;
+        grand_total_weight_bytes += (p.weight_bytes + p.scale_bytes);
+
+        if (p.total_time_ms > 0.0) {
+            p.achieved_bw_gbs = (static_cast<double>(p.total_bytes) / 1e9) / (p.total_time_ms / 1000.0);
+        }
+    }
+
+    std::cout << "\n=========================================================================================================================" << std::endl;
+    std::cout << "                                  DETAILED INT4 LINEAR GEMV SHAPE & BANDWIDTH BREAKDOWN                                  " << std::endl;
+    std::cout << "=========================================================================================================================" << std::endl;
+    std::cout << std::left << std::setw(18) << "Projection Type"
+              << std::right << std::setw(14) << "Shape [N x K]"
+              << std::setw(7) << "Count"
+              << std::setw(13) << "Total MB"
+              << std::setw(12) << "Time (ms)"
+              << std::setw(12) << "Avg/Op(ms)"
+              << std::setw(10) << "% Linear"
+              << std::setw(13) << "Bandwidth"
+              << std::setw(12) << "Status" << std::endl;
+    std::cout << "-------------------------------------------------------------------------------------------------------------------------" << std::endl;
+
+    for (const auto& p : projs) {
+        double pct = (grand_total_time_ms > 0.0) ? (p.total_time_ms / grand_total_time_ms * 100.0) : 0.0;
+        double mb = static_cast<double>(p.total_bytes) / (1024.0 * 1024.0);
+        double avg_ms = p.total_time_ms / p.count;
+
+        std::string shape_str = std::to_string(p.N) + "x" + std::to_string(p.K);
+        std::string status = (p.achieved_bw_gbs < 50.0) ? "SEVERELY LOW" : (p.achieved_bw_gbs < 100.0 ? "SUBOPTIMAL" : "SATURATED");
+
+        std::cout << std::left << std::setw(18) << p.name
+                  << std::right << std::setw(14) << shape_str
+                  << std::setw(7) << p.count
+                  << std::fixed << std::setprecision(1) << std::setw(13) << mb
+                  << std::setprecision(2) << std::setw(12) << p.total_time_ms
+                  << std::setprecision(3) << std::setw(12) << avg_ms
+                  << std::setprecision(2) << std::setw(9) << pct << "%"
+                  << std::setprecision(1) << std::setw(10) << p.achieved_bw_gbs << " GB/s"
+                  << std::setw(14) << status << std::endl;
+    }
+    std::cout << "-------------------------------------------------------------------------------------------------------------------------" << std::endl;
+    double aggregate_bw = (static_cast<double>(grand_total_bytes) / 1e9) / (grand_total_time_ms / 1000.0);
+    double aggregate_weight_bw = (static_cast<double>(grand_total_weight_bytes) / 1e9) / (grand_total_time_ms / 1000.0);
+    std::cout << std::left << std::setw(18) << "TOTAL LINEAR GEMV"
+              << std::right << std::setw(14) << "All 13 Shapes"
+              << std::setw(7) << 497
+              << std::fixed << std::setprecision(1) << std::setw(13) << (grand_total_bytes / (1024.0 * 1024.0))
+              << std::setprecision(2) << std::setw(12) << grand_total_time_ms
+              << std::setw(12) << "-"
+              << std::setw(9) << "100.00%"
+              << std::setprecision(1) << std::setw(10) << aggregate_bw << " GB/s"
+              << std::setw(14) << "-" << std::endl;
+    std::cout << "=========================================================================================================================" << std::endl;
+    std::cout << "Aggregate Model Weights Read:        " << (grand_total_weight_bytes / 1e9) << " GB" << std::endl;
+    std::cout << "Aggregate Weight Memory Bandwidth:   " << aggregate_weight_bw << " GB/s" << std::endl;
+    std::cout << "Aggregate Total Bus Traffic Bandwidth:" << aggregate_bw << " GB/s" << std::endl;
+
+    sycl::free(act_x, q);
+    sycl::free(act_normed, q);
+    sycl::free(act_proj_out, q);
+    sycl::free(act_mlp_gate, q);
+    sycl::free(act_mlp_up, q);
+    sycl::free(act_q_gate, q);
+    sycl::free(act_k, q);
+    sycl::free(act_v, q);
+    sycl::free(act_attn_out, q);
+    sycl::free(act_qkv_raw, q);
+    sycl::free(act_z, q);
+    sycl::free(act_b, q);
+    sycl::free(act_a, q);
+    sycl::free(act_delta_out, q);
+    sycl::free(d_logits, q);
+
+    return 0;
+}

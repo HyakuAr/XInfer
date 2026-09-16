@@ -34,16 +34,16 @@ void gemm_xmx(sycl::queue& q,
 // scales: [N, K/group_size] (FP16 per-group scales)
 // bias: [N] (optional FP32 bias)
 // Y: [M, N] (FP32 output)
-void linear_int4(sycl::queue& q,
-                 float* Y,
-                 const float* X,
-                 const uint8_t* W_int4,
-                 const sycl::half* scales,
-                 const float* bias,
-                 int64_t M,
-                 int64_t N,
-                 int64_t K,
-                 int group_size = 128);
+sycl::event linear_int4(sycl::queue& q,
+                  float* Y,
+                  const float* X,
+                  const uint8_t* W_int4,
+                  const sycl::half* scales,
+                  const float* bias,
+                  int64_t M,
+                  int64_t N,
+                  int64_t K,
+                  int group_size = 128);
 
 // =============================================================================
 // Reference-Only Naive Kernels (Preserved for numerical oracle validation)

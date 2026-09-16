@@ -217,4 +217,34 @@ target_link_options(test_serve_schema PRIVATE -fsycl)
 
 add_test(NAME ServeSchemaTest COMMAND test_serve_schema)
 
+# Milestone 10: Performance Diagnostic & Profiler
+add_executable(profile_decode_step
+    tools/parity/profile_decode_step.cpp
+)
+target_include_directories(profile_decode_step PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(profile_decode_step PRIVATE
+    xinfer_targets
+    xinfer_runtime
+)
+target_compile_options(profile_decode_step PRIVATE -fsycl)
+target_link_options(profile_decode_step PRIVATE -fsycl)
+
+add_executable(verify_pcie_and_memory
+    tools/parity/verify_pcie_and_memory.cpp
+)
+target_include_directories(verify_pcie_and_memory PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(verify_pcie_and_memory PRIVATE
+    xinfer_targets
+    xinfer_runtime
+)
+target_compile_options(verify_pcie_and_memory PRIVATE -fsycl)
+target_link_options(verify_pcie_and_memory PRIVATE -fsycl)
+
+
 

@@ -2,15 +2,44 @@
 
 namespace xinfer::targets::qwen3_8 {
 
-void causal_conv1d_silu(sycl::queue& q,
-                        float* out_qkv,
-                        const float* in_qkv,
-                        const float* conv_w,
-                        int64_t seq_len,
-                        float* conv_state) {
+sycl::event causal_conv1d_silu(sycl::queue& q,
+                               float* out_qkv,
+                               const float* in_qkv,
+                               const float* conv_w,
+                               int64_t seq_len,
+                               float* conv_state) {
     constexpr int64_t num_channels = 10240;
+    if (seq_len <= 0) return sycl::event{};
 
-    q.parallel_for(sycl::range<2>(seq_len, num_channels), [=](sycl::id<2> idx) {
+    if (seq_len == 1) {
+        return q.parallel_for(sycl::range<1>(num_channels), [=](sycl::id<1> idx) {
+            int64_t c = idx[0];
+            float in_val = in_qkv[c];
+            float s0 = conv_state ? conv_state[0 * num_channels + c] : 0.0f;
+            float s1 = conv_state ? conv_state[1 * num_channels + c] : 0.0f;
+            float s2 = conv_state ? conv_state[2 * num_channels + c] : 0.0f;
+
+            // conv_w has shape [num_channels, 4]
+            // k = 0 (src_t = -3): s0
+            // k = 1 (src_t = -2): s1
+            // k = 2 (src_t = -1): s2
+            // k = 3 (src_t = 0):  in_val
+            float sum = conv_w[c * 4 + 0] * s0 +
+                        conv_w[c * 4 + 1] * s1 +
+                        conv_w[c * 4 + 2] * s2 +
+                        conv_w[c * 4 + 3] * in_val;
+
+            out_qkv[c] = sum / (1.0f + sycl::exp(-sum));
+
+            if (conv_state) {
+                conv_state[0 * num_channels + c] = s1;
+                conv_state[1 * num_channels + c] = s2;
+                conv_state[2 * num_channels + c] = in_val;
+            }
+        });
+    }
+
+    auto e1 = q.parallel_for(sycl::range<2>(seq_len, num_channels), [=](sycl::id<2> idx) {
         int64_t t = idx[0];
         int64_t c = idx[1];
 
@@ -37,7 +66,7 @@ void causal_conv1d_silu(sycl::queue& q,
 
     // Update conv_state with the last up to 3 timesteps of in_qkv
     if (conv_state && seq_len > 0) {
-        q.parallel_for(sycl::range<1>(num_channels), [=](sycl::id<1> idx) {
+        return q.parallel_for(sycl::range<1>(num_channels), [=](sycl::id<1> idx) {
             int64_t c = idx[0];
             if (seq_len >= 3) {
                 conv_state[0 * num_channels + c] = in_qkv[(seq_len - 3) * num_channels + c];
@@ -54,20 +83,22 @@ void causal_conv1d_silu(sycl::queue& q,
             }
         });
     }
+    return e1;
 }
 
-void recurrent_gated_delta_net(sycl::queue& q,
-                               float* out,
-                               const float* qkv,
-                               const float* z,
-                               const float* b,
-                               const float* a,
-                               const float* A_log,
-                               const float* dt_bias,
-                               const float* norm_weight,
-                               float* state_buffer,
-                               int64_t seq_len,
-                               bool zero_state) {
+sycl::event recurrent_gated_delta_net(sycl::queue& q,
+                                      float* out,
+                                      const float* qkv,
+                                      const float* z,
+                                      const float* b,
+                                      const float* a,
+                                      const float* A_log,
+                                      const float* dt_bias,
+                                      const float* norm_weight,
+                                      float* state_buffer,
+                                      int64_t seq_len,
+                                      bool zero_state) {
+    if (seq_len <= 0) return sycl::event{};
     constexpr int64_t num_v_heads = 48;
     constexpr int64_t num_k_heads = 16;
     constexpr int64_t head_k_dim = 128;
@@ -75,117 +106,145 @@ void recurrent_gated_delta_net(sycl::queue& q,
     constexpr int64_t total_channels = 10240;
     constexpr int64_t value_dim = 6144;
 
-    // Launch 48 parallel work-items, one per value head
-    q.parallel_for(sycl::range<1>(num_v_heads), [=](sycl::id<1> idx) {
-        int64_t h = idx[0];
-        int64_t h_k = h / 3; // Key/query head shared across 3 value heads
+    return q.submit([&](sycl::handler& cgh) {
+        sycl::local_accessor<float, 1> shared_q(sycl::range<1>(128), cgh);
+        sycl::local_accessor<float, 1> shared_k(sycl::range<1>(128), cgh);
+        sycl::local_accessor<float, 1> shared_inv_std(sycl::range<1>(1), cgh);
+        sycl::local_accessor<float, 1> slm_sums(sycl::range<1>(8), cgh); // 8 sub-groups of 16
 
-        // State pointer for this head: [128, 128]
-        float* S = state_buffer + h * (head_k_dim * head_v_dim);
+        cgh.parallel_for(
+            sycl::nd_range<2>(sycl::range<2>(num_v_heads, 128), sycl::range<2>(1, 128)),
+            [=](sycl::nd_item<2> item) [[sycl::reqd_sub_group_size(16)]] {
+                int64_t h = item.get_group(0);
+                int64_t j = item.get_local_id(1); // 0..127
+                int64_t h_k = h / 3;
+                sycl::sub_group sg = item.get_sub_group();
+                size_t sg_id = sg.get_group_linear_id();
 
-        // Zero state only if explicitly requested (e.g. start of prompt)
-        if (zero_state) {
-            for (int i = 0; i < head_k_dim * head_v_dim; ++i) {
-                S[i] = 0.0f;
-            }
-        }
+                float* S = state_buffer + h * (head_k_dim * head_v_dim);
 
-        float a_log_val = A_log[h];
-        float exp_a_log = sycl::exp(a_log_val);
-        float dt_bias_val = dt_bias[h];
-
-        // Step sequentially through time t
-        for (int64_t t = 0; t < seq_len; ++t) {
-            // Pointers for time step t
-            const float* cur_qkv = qkv + t * total_channels;
-            const float* cur_q_in = cur_qkv + (h_k * head_k_dim);
-            const float* cur_k_in = cur_qkv + (num_k_heads * head_k_dim) + (h_k * head_k_dim);
-            const float* cur_v_in = cur_qkv + (num_k_heads * head_k_dim * 2) + (h * head_v_dim);
-
-            // 1. L2 normalize q and k
-            float sum_sq_q = 0.0f;
-            float sum_sq_k = 0.0f;
-            for (int d = 0; d < 128; ++d) {
-                float q_val = cur_q_in[d];
-                float k_val = cur_k_in[d];
-                sum_sq_q += q_val * q_val;
-                sum_sq_k += k_val * k_val;
-            }
-            float inv_norm_q = 1.0f / sycl::sqrt(sum_sq_q + 1e-6f);
-            float inv_norm_k = 1.0f / sycl::sqrt(sum_sq_k + 1e-6f);
-            constexpr float q_scale = 0.08838834764f; // 1.0 / sqrt(128.0)
-
-            float q_vec[128];
-            float k_vec[128];
-            for (int d = 0; d < 128; ++d) {
-                q_vec[d] = (cur_q_in[d] * inv_norm_q) * q_scale;
-                k_vec[d] = cur_k_in[d] * inv_norm_k;
-            }
-
-            // 2. Compute beta and decay g
-            float b_val = b[t * num_v_heads + h];
-            float beta = 1.0f / (1.0f + sycl::exp(-b_val));
-
-            float a_val = a[t * num_v_heads + h] + dt_bias_val;
-            float softplus_a = (a_val > 20.0f) ? a_val : sycl::log(1.0f + sycl::exp(a_val));
-            float g = -exp_a_log * softplus_a;
-            float exp_g = sycl::exp(g);
-
-            // 3. Decay state S *= exp(g)
-            for (int i = 0; i < 128 * 128; ++i) {
-                S[i] *= exp_g;
-            }
-
-            // 4. kv_mem[j] = sum_i (S[i, j] * k[i])
-            float kv_mem[128];
-            for (int j = 0; j < 128; ++j) {
-                float sum = 0.0f;
-                for (int i = 0; i < 128; ++i) {
-                    sum += S[i * 128 + j] * k_vec[i];
+                if (zero_state) {
+                    for (int i = 0; i < 128; ++i) {
+                        S[i * 128 + j] = 0.0f;
+                    }
                 }
-                kv_mem[j] = sum;
-            }
 
-            // 5. delta[j] = (v[j] - kv_mem[j]) * beta
-            float delta[128];
-            for (int j = 0; j < 128; ++j) {
-                delta[j] = (cur_v_in[j] - kv_mem[j]) * beta;
-            }
+                float a_log_val = A_log[h];
+                float exp_a_log = sycl::exp(a_log_val);
+                float dt_bias_val = dt_bias[h];
 
-            // 6. S[i, j] += k[i] * delta[j]
-            for (int i = 0; i < 128; ++i) {
-                float k_i = k_vec[i];
-                for (int j = 0; j < 128; ++j) {
-                    S[i * 128 + j] += k_i * delta[j];
+                for (int64_t t = 0; t < seq_len; ++t) {
+                    const float* cur_qkv = qkv + t * total_channels;
+                    const float* cur_q_in = cur_qkv + (h_k * head_k_dim);
+                    const float* cur_k_in = cur_qkv + (num_k_heads * head_k_dim) + (h_k * head_k_dim);
+                    const float* cur_v_in = cur_qkv + (num_k_heads * head_k_dim * 2) + (h * head_v_dim);
+
+                    // 1. Cooperative L2 norm of q and k
+                    float raw_q = cur_q_in[j];
+                    float raw_k = cur_k_in[j];
+                    float q_sq = raw_q * raw_q;
+                    float k_sq = raw_k * raw_k;
+
+                    float sg_q_sq = sycl::reduce_over_group(sg, q_sq, sycl::plus<float>());
+                    float sg_k_sq = sycl::reduce_over_group(sg, k_sq, sycl::plus<float>());
+                    if (sg.get_local_linear_id() == 0) {
+                        slm_sums[sg_id] = sg_q_sq;
+                    }
+                    item.barrier(sycl::access::fence_space::local_space);
+
+                    if (sg_id == 0) {
+                        float total_q_sq = 0.0f;
+                        if (sg.get_local_linear_id() < 8) {
+                            total_q_sq = slm_sums[sg.get_local_linear_id()];
+                        }
+                        float full_q_sq = sycl::reduce_over_group(sg, total_q_sq, sycl::plus<float>());
+                        if (sg.get_local_linear_id() == 0) {
+                            shared_inv_std[0] = 1.0f / sycl::sqrt(full_q_sq + 1e-6f);
+                        }
+                    }
+                    item.barrier(sycl::access::fence_space::local_space);
+                    float inv_norm_q = shared_inv_std[0];
+
+                    if (sg.get_local_linear_id() == 0) {
+                        slm_sums[sg_id] = sg_k_sq;
+                    }
+                    item.barrier(sycl::access::fence_space::local_space);
+
+                    if (sg_id == 0) {
+                        float total_k_sq = 0.0f;
+                        if (sg.get_local_linear_id() < 8) {
+                            total_k_sq = slm_sums[sg.get_local_linear_id()];
+                        }
+                        float full_k_sq = sycl::reduce_over_group(sg, total_k_sq, sycl::plus<float>());
+                        if (sg.get_local_linear_id() == 0) {
+                            shared_inv_std[0] = 1.0f / sycl::sqrt(full_k_sq + 1e-6f);
+                        }
+                    }
+                    item.barrier(sycl::access::fence_space::local_space);
+                    float inv_norm_k = shared_inv_std[0];
+
+                    constexpr float q_scale = 0.08838834764f;
+                    shared_q[j] = (raw_q * inv_norm_q) * q_scale;
+                    shared_k[j] = raw_k * inv_norm_k;
+                    item.barrier(sycl::access::fence_space::local_space);
+
+                    // 2. Beta and decay g
+                    float b_val = b[t * num_v_heads + h];
+                    float beta = 1.0f / (1.0f + sycl::exp(-b_val));
+
+                    float a_val = a[t * num_v_heads + h] + dt_bias_val;
+                    float softplus_a = (a_val > 20.0f) ? a_val : sycl::log(1.0f + sycl::exp(a_val));
+                    float g = -exp_a_log * softplus_a;
+                    float exp_g = sycl::exp(g);
+
+                    // 3 & 4. Decay column j and compute kv_mem[j] = sum_i (S[i, j] * k[i])
+                    float kv_mem_j = 0.0f;
+                    for (int i = 0; i < 128; ++i) {
+                        float s_val = S[i * 128 + j] * exp_g;
+                        S[i * 128 + j] = s_val;
+                        kv_mem_j += s_val * shared_k[i];
+                    }
+
+                    // 5 & 6 & 7. Fused delta update and core_attn_out in a single pass over S
+                    float delta_j = (cur_v_in[j] - kv_mem_j) * beta;
+                    float attn_j = 0.0f;
+                    for (int i = 0; i < 128; ++i) {
+                        float new_s = S[i * 128 + j] + shared_k[i] * delta_j;
+                        S[i * 128 + j] = new_s;
+                        attn_j += new_s * shared_q[i];
+                    }
+
+                    // 8. Workgroup RMSNorm of attn_j across 128 threads
+                    float attn_sq = attn_j * attn_j;
+                    float sg_attn_sq = sycl::reduce_over_group(sg, attn_sq, sycl::plus<float>());
+                    if (sg.get_local_linear_id() == 0) {
+                        slm_sums[sg_id] = sg_attn_sq;
+                    }
+                    item.barrier(sycl::access::fence_space::local_space);
+
+                    if (sg_id == 0) {
+                        float total_attn_sq = 0.0f;
+                        if (sg.get_local_linear_id() < 8) {
+                            total_attn_sq = slm_sums[sg.get_local_linear_id()];
+                        }
+                        float full_attn_sq = sycl::reduce_over_group(sg, total_attn_sq, sycl::plus<float>());
+                        if (sg.get_local_linear_id() == 0) {
+                            float variance = full_attn_sq / 128.0f;
+                            shared_inv_std[0] = 1.0f / sycl::sqrt(variance + 1e-6f);
+                        }
+                    }
+                    item.barrier(sycl::access::fence_space::local_space);
+
+                    float inv_std = shared_inv_std[0];
+                    const float* cur_z = z + t * value_dim + h * 128;
+                    float* cur_out = out + t * value_dim + h * 128;
+
+                    float normed = attn_j * inv_std * norm_weight[j];
+                    float z_val = cur_z[j];
+                    float silu_z = z_val / (1.0f + sycl::exp(-z_val));
+                    cur_out[j] = normed * silu_z;
                 }
-            }
-
-            // 7. core_attn_out[j] = sum_i (S[i, j] * q[i])
-            float attn_h[128];
-            float sum_sq_out = 0.0f;
-            for (int j = 0; j < 128; ++j) {
-                float sum = 0.0f;
-                for (int i = 0; i < 128; ++i) {
-                    sum += S[i * 128 + j] * q_vec[i];
-                }
-                attn_h[j] = sum;
-                sum_sq_out += sum * sum;
-            }
-
-            // 8. Qwen3_5RMSNormGated: rmsnorm(attn_h) * silu(z)
-            float variance = sum_sq_out / 128.0f;
-            float inv_std = 1.0f / sycl::sqrt(variance + 1e-6f);
-
-            const float* cur_z = z + t * value_dim + h * 128;
-            float* cur_out = out + t * value_dim + h * 128;
-
-            for (int j = 0; j < 128; ++j) {
-                float normed = attn_h[j] * inv_std * norm_weight[j];
-                float z_val = cur_z[j];
-                float silu_z = z_val / (1.0f + sycl::exp(-z_val));
-                cur_out[j] = normed * silu_z;
-            }
-        }
+            });
     });
 }
 

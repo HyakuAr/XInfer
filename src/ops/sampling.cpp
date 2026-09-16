@@ -11,9 +11,23 @@ int64_t argmax(sycl::queue& q, const float* logits, int64_t vocab_size) {
     constexpr size_t WG_SIZE = 256;
     size_t num_wgs = (static_cast<size_t>(vocab_size) + WG_SIZE - 1) / WG_SIZE;
 
-    // Allocate USM shared memory for inter-workgroup partial reduction
-    float* partial_max = sycl::malloc_shared<float>(num_wgs, q);
-    int64_t* partial_idx = sycl::malloc_shared<int64_t>(num_wgs, q);
+    // Reusable shared memory buffer to avoid per-step OS/driver allocation overhead (191ms saved)
+    static std::mutex s_mtx;
+    static float* s_partial_max = nullptr;
+    static int64_t* s_partial_idx = nullptr;
+    static size_t s_capacity = 0;
+
+    std::lock_guard<std::mutex> lock(s_mtx);
+    if (s_capacity < num_wgs) {
+        if (s_partial_max) sycl::free(s_partial_max, q);
+        if (s_partial_idx) sycl::free(s_partial_idx, q);
+        s_partial_max = sycl::malloc_shared<float>(num_wgs, q);
+        s_partial_idx = sycl::malloc_shared<int64_t>(num_wgs, q);
+        s_capacity = num_wgs;
+    }
+
+    float* partial_max = s_partial_max;
+    int64_t* partial_idx = s_partial_idx;
 
     // Stage 1: Workgroup local reduction
     q.submit([&](sycl::handler& cgh) {
@@ -66,9 +80,6 @@ int64_t argmax(sycl::queue& q, const float* logits, int64_t vocab_size) {
             best_idx = partial_idx[i];
         }
     }
-
-    sycl::free(partial_max, q);
-    sycl::free(partial_idx, q);
 
     return best_idx;
 }
