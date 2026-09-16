@@ -175,4 +175,46 @@ target_link_options(test_decode_graph PRIVATE -fsycl)
 
 add_test(NAME DecodeGraphTest COMMAND test_decode_graph)
 
+# Milestone 9: OpenAI-Compatible HTTP Serving
+add_library(xinfer_serve STATIC
+    src/serve/protocol.cpp
+    src/serve/server.cpp
+)
+target_include_directories(xinfer_serve PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(xinfer_serve PUBLIC
+    xinfer_runtime
+)
+if (WIN32)
+    target_link_libraries(xinfer_serve PUBLIC ws2_32)
+endif()
+target_compile_options(xinfer_serve PUBLIC -fsycl)
+target_link_options(xinfer_serve PUBLIC -fsycl)
+
+add_executable(xinfer-serve
+    apps/xinfer-serve/main.cpp
+)
+target_include_directories(xinfer-serve PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(xinfer-serve PRIVATE
+    xinfer_serve
+)
+target_compile_options(xinfer-serve PRIVATE -fsycl)
+target_link_options(xinfer-serve PRIVATE -fsycl)
+
+add_executable(test_serve_schema
+    tests/test_serve_schema.cpp
+)
+target_link_libraries(test_serve_schema PRIVATE
+    xinfer_serve
+)
+target_compile_options(test_serve_schema PRIVATE -fsycl)
+target_link_options(test_serve_schema PRIVATE -fsycl)
+
+add_test(NAME ServeSchemaTest COMMAND test_serve_schema)
+
 

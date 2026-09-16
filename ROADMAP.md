@@ -267,9 +267,16 @@ per-step launch overhead.
 3. Basic error handling (bad request, context-length exceeded).
 
 **DoD:**
-- [ ] `curl` against `/v1/chat/completions` returns a correct, well-formed
-      response for a simple prompt.
-- [ ] Serving layer contains no inference logic — it only calls the Engine.
+- [x] `curl` against `/v1/chat/completions` returns a correct, well-formed
+      response for a simple prompt (verified for both non-streaming JSON and streaming SSE event chunks).
+- [x] Serving layer contains no inference logic — it only calls the Engine (strictly isolated in `src/serve` per `AGENTS.md` §4).
+- [x] Request and response schema test suite passing 100% in CTest (`tests/test_serve_schema.cpp`).
+- [x] Tested and verified endpoints:
+  - `GET /health` -> `{"status":"ok"}`
+  - `GET /v1/models` -> `{"object":"list","data":[{"id":"qwen3.8-27b",...}]}`
+  - `POST /v1/chat/completions` (non-streaming) -> full OpenAI `chat.completion` response with `usage` statistics
+  - `POST /v1/chat/completions` (streaming) -> `text/event-stream` SSE chunks ending with `data: [DONE]`
+  - Error handling -> HTTP 400 with standard OpenAI `{"error":{...}}` payload on malformed/invalid requests
 
 ---
 

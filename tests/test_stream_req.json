@@ -1,0 +1,11 @@
+{
+  "model": "qwen3.8-27b",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Count from 1 to 3"
+    }
+  ],
+  "max_tokens": 5,
+  "stream": true
+}
