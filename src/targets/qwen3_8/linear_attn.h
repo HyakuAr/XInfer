@@ -9,11 +9,13 @@ namespace xinfer::targets::qwen3_8 {
 // in_qkv:  [seq_len, 10240] (row-major)
 // conv_w:  [10240, 4] (weight per channel, k=0..3)
 // out_qkv: [seq_len, 10240]
+// conv_state: optional [3, 10240] past timesteps buffer (if nullptr, assumes zeros for past)
 void causal_conv1d_silu(sycl::queue& q,
                         float* out_qkv,
                         const float* in_qkv,
                         const float* conv_w,
-                        int64_t seq_len);
+                        int64_t seq_len,
+                        float* conv_state = nullptr);
 
 // Recurrent Gated Delta Rule + RMSNormGated:
 // qkv: [seq_len, 10240] (channels: q=0..2047, k=2048..4095, v=4096..10239)
@@ -24,7 +26,8 @@ void causal_conv1d_silu(sycl::queue& q,
 // dt_bias: [48]
 // norm_weight: [128]
 // out: [seq_len, 6144]
-// state_buffer: [48, 128, 128] scratchpad
+// state_buffer: [48, 128, 128] state buffer
+// zero_state: if true, zeroes state_buffer before processing (e.g. at start of prompt)
 void recurrent_gated_delta_net(sycl::queue& q,
                                float* out,
                                const float* qkv,
@@ -35,6 +38,7 @@ void recurrent_gated_delta_net(sycl::queue& q,
                                const float* dt_bias,
                                const float* norm_weight,
                                float* state_buffer,
-                               int64_t seq_len);
+                               int64_t seq_len,
+                               bool zero_state = false);
 
 } // namespace xinfer::targets::qwen3_8

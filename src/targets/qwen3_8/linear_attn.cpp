@@ -6,7 +6,8 @@ void causal_conv1d_silu(sycl::queue& q,
                         float* out_qkv,
                         const float* in_qkv,
                         const float* conv_w,
-                        int64_t seq_len) {
+                        int64_t seq_len,
+                        float* conv_state) {
     constexpr int64_t num_channels = 10240;
 
     q.parallel_for(sycl::range<2>(seq_len, num_channels), [=](sycl::id<2> idx) {
@@ -17,13 +18,42 @@ void causal_conv1d_silu(sycl::queue& q,
         // conv_w has shape [num_channels, 4]
         for (int k = 0; k < 4; ++k) {
             int64_t src_t = t - (3 - k);
-            float val = (src_t >= 0) ? in_qkv[src_t * num_channels + c] : 0.0f;
+            float val = 0.0f;
+            if (src_t >= 0) {
+                val = in_qkv[src_t * num_channels + c];
+            } else if (conv_state) {
+                // src_t is -1, -2, or -3. conv_state has shape [3, 10240]
+                int64_t state_idx = 3 + src_t;
+                if (state_idx >= 0 && state_idx < 3) {
+                    val = conv_state[state_idx * num_channels + c];
+                }
+            }
             sum += conv_w[c * 4 + k] * val;
         }
 
         // SiLU: x / (1 + exp(-x))
         out_qkv[t * num_channels + c] = sum / (1.0f + sycl::exp(-sum));
     });
+
+    // Update conv_state with the last up to 3 timesteps of in_qkv
+    if (conv_state && seq_len > 0) {
+        q.parallel_for(sycl::range<1>(num_channels), [=](sycl::id<1> idx) {
+            int64_t c = idx[0];
+            if (seq_len >= 3) {
+                conv_state[0 * num_channels + c] = in_qkv[(seq_len - 3) * num_channels + c];
+                conv_state[1 * num_channels + c] = in_qkv[(seq_len - 2) * num_channels + c];
+                conv_state[2 * num_channels + c] = in_qkv[(seq_len - 1) * num_channels + c];
+            } else if (seq_len == 1) {
+                conv_state[0 * num_channels + c] = conv_state[1 * num_channels + c];
+                conv_state[1 * num_channels + c] = conv_state[2 * num_channels + c];
+                conv_state[2 * num_channels + c] = in_qkv[c];
+            } else if (seq_len == 2) {
+                conv_state[0 * num_channels + c] = conv_state[2 * num_channels + c];
+                conv_state[1 * num_channels + c] = in_qkv[0 * num_channels + c];
+                conv_state[2 * num_channels + c] = in_qkv[1 * num_channels + c];
+            }
+        });
+    }
 }
 
 void recurrent_gated_delta_net(sycl::queue& q,
@@ -36,7 +66,8 @@ void recurrent_gated_delta_net(sycl::queue& q,
                                const float* dt_bias,
                                const float* norm_weight,
                                float* state_buffer,
-                               int64_t seq_len) {
+                               int64_t seq_len,
+                               bool zero_state) {
     constexpr int64_t num_v_heads = 48;
     constexpr int64_t num_k_heads = 16;
     constexpr int64_t head_k_dim = 128;
@@ -52,9 +83,11 @@ void recurrent_gated_delta_net(sycl::queue& q,
         // State pointer for this head: [128, 128]
         float* S = state_buffer + h * (head_k_dim * head_v_dim);
 
-        // Zero state
-        for (int i = 0; i < head_k_dim * head_v_dim; ++i) {
-            S[i] = 0.0f;
+        // Zero state only if explicitly requested (e.g. start of prompt)
+        if (zero_state) {
+            for (int i = 0; i < head_k_dim * head_v_dim; ++i) {
+                S[i] = 0.0f;
+            }
         }
 
         float a_log_val = A_log[h];

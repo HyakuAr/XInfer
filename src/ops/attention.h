@@ -22,4 +22,32 @@ void sdpa_causal_naive(sycl::queue& q,
                        int64_t head_dim,
                        float scale = 0.0f);
 
+// Write computed FP32 K and V into FP16 KV cache at [start_pos, start_pos + num_tokens)
+void attention_write_kv_cache(sycl::queue& q,
+                              sycl::half* k_cache,
+                              sycl::half* v_cache,
+                              const float* K_in,
+                              const float* V_in,
+                              int64_t start_pos,
+                              int64_t num_tokens,
+                              int64_t num_kv_heads,
+                              int64_t head_dim);
+
+// Causal SDPA reading from FP16 KV cache (supports single-token decode and chunked prefill)
+// Q: [num_q_tokens, num_q_heads, head_dim] (float)
+// k_cache, v_cache: [max_seq_len, num_kv_heads, head_dim] (sycl::half)
+// out: [num_q_tokens, num_q_heads, head_dim] (float)
+// start_pos: absolute sequence position of first query token in Q
+void sdpa_causal_cached(sycl::queue& q,
+                        float* out,
+                        const float* Q,
+                        const sycl::half* k_cache,
+                        const sycl::half* v_cache,
+                        int64_t start_pos,
+                        int64_t num_q_tokens,
+                        int64_t num_q_heads,
+                        int64_t num_kv_heads,
+                        int64_t head_dim,
+                        float scale = 0.0f);
+
 } // namespace xinfer::ops

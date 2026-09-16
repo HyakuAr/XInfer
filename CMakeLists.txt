@@ -54,6 +54,7 @@ add_library(xinfer_core STATIC
     src/core/tensor.cpp
     src/core/arena.cpp
     src/core/command_list.cpp
+    src/core/kv_cache.cpp
 )
 target_include_directories(xinfer_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -70,9 +71,20 @@ target_link_libraries(test_core_device PRIVATE
 target_compile_options(test_core_device PRIVATE -fsycl)
 target_link_options(test_core_device PRIVATE -fsycl)
 
+add_executable(test_kv_cache
+    tests/test_kv_cache.cpp
+)
+target_link_libraries(test_kv_cache PRIVATE
+    xinfer_core
+    xinfer_ops
+)
+target_compile_options(test_kv_cache PRIVATE -fsycl)
+target_link_options(test_kv_cache PRIVATE -fsycl)
+
 enable_testing()
 add_test(NAME ArtifactRoundTrip COMMAND test_artifact_roundtrip)
 add_test(NAME CoreDeviceTest COMMAND test_core_device)
+add_test(NAME KVCacheTest COMMAND test_kv_cache)
 
 # Milestone 4: Naive correctness kernels (no XMX yet)
 add_library(xinfer_ops STATIC

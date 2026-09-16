@@ -127,24 +127,25 @@ void test_rope_oracle(DeviceContext& ctx) {
     // CPU Oracle evaluation
     std::vector<float> oracle_q = h_q_in;
     std::vector<float> oracle_k = h_k_in;
-    int64_t half_dim = head_dim / 2;
+    int64_t rotary_dim = 64;
+    int64_t half_rot = rotary_dim / 2;
 
     auto apply_oracle_rope = [&](std::vector<float>& buf, int64_t num_heads) {
         for (int64_t t = 0; t < num_tokens; ++t) {
             int64_t pos = positions[t];
             for (int64_t h = 0; h < num_heads; ++h) {
                 int64_t base = (t * num_heads + h) * head_dim;
-                for (int64_t p = 0; p < half_dim; ++p) {
-                    double freq = 1.0 / std::pow(static_cast<double>(theta), static_cast<double>(2 * p) / static_cast<double>(head_dim));
+                for (int64_t p = 0; p < half_rot; ++p) {
+                    double freq = 1.0 / std::pow(static_cast<double>(theta), static_cast<double>(2 * p) / static_cast<double>(rotary_dim));
                     double angle = static_cast<double>(pos) * freq;
                     float cos_val = static_cast<float>(std::cos(angle));
                     float sin_val = static_cast<float>(std::sin(angle));
 
-                    float v0 = buf[base + 2 * p];
-                    float v1 = buf[base + 2 * p + 1];
+                    float v0 = buf[base + p];
+                    float v1 = buf[base + p + half_rot];
 
-                    buf[base + 2 * p] = v0 * cos_val - v1 * sin_val;
-                    buf[base + 2 * p + 1] = v0 * sin_val + v1 * cos_val;
+                    buf[base + p] = v0 * cos_val - v1 * sin_val;
+                    buf[base + p + half_rot] = v1 * cos_val + v0 * sin_val;
                 }
             }
         }
@@ -162,7 +163,7 @@ void test_rope_oracle(DeviceContext& ctx) {
     ctx.copy_host_to_device(d_k, h_k_in.data(), k_elements * sizeof(float));
     ctx.copy_host_to_device(d_pos, positions.data(), num_tokens * sizeof(int64_t));
 
-    rope(ctx.queue(), d_q, d_k, num_tokens, num_q_heads, num_kv_heads, head_dim, d_pos, theta);
+    rope(ctx.queue(), d_q, d_k, num_tokens, num_q_heads, num_kv_heads, head_dim, d_pos, theta, rotary_dim);
 
     std::vector<float> gpu_q(q_elements);
     std::vector<float> gpu_k(k_elements);

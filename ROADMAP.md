@@ -187,10 +187,16 @@ prompts longer than a single forward pass comfortably handles.
    stays within the B60's 24 GB budget for a stated max context length.
 
 **DoD:**
-- [ ] KV cache implemented and used by the decode path.
-- [ ] Chunked prefill works for prompts longer than one chunk.
-- [ ] Documented max practical context length at this stage, with memory
-      accounting.
+- [x] KV cache implemented and used by the decode path (`src/core/kv_cache.h/cpp`).
+- [x] Chunked prefill works for prompts longer than one chunk (verified on multi-chunk prompt producing "Rayleigh scattering").
+- [x] Documented max practical context length at this stage, with memory accounting:
+  - Total B60 VRAM: 24 GB GDDR6 (~23 GB usable in SYCL).
+  - Model Weights (INT4 + BF16 scales/norms): 15.77 GB.
+  - Device Arena (transient scratchpad): 256 MB.
+  - Linear Attention Recurrent State (48 layers, constant size): ~150 MB (144 MB $S$ matrix + 5.76 MB conv1d state).
+  - Full Attention KV Cache (16 layers, FP16, GQA 4 heads, head_dim 256): 64 KB / token.
+  - Configured default: **8,192 tokens** (512 MB KV cache, 16.7 GB total VRAM resident).
+  - Maximum practical context length: **65,536 tokens** (4.0 GB KV cache, 20.2 GB total VRAM resident).
 
 ---
 

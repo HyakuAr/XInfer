@@ -4,7 +4,7 @@
 #include "artifact/reader.h"
 #include "targets/qwen3_8/tokenizer.h"
 #include "targets/qwen3_8/forward.h"
-#include "targets/qwen3_8_27b/weights.h"
+#include "core/kv_cache.h"
 #include <chrono>
 #include <iostream>
 
@@ -66,12 +66,23 @@ public:
         // 5. Initialize device scratchpad arena
         arena_ = std::make_unique<core::DeviceArena>(ctx_, config.arena_capacity_bytes);
 
+        // 6. Initialize persistent KV cache and recurrent states
+        core::KVCacheConfig kv_cfg;
+        kv_cfg.max_seq_len = config.max_seq_len;
+        kv_cache_ = std::make_unique<core::KVCache>(ctx_, kv_cfg);
+        if (!kv_cache_->allocate()) {
+            if (error_msg) *error_msg = "Failed to allocate KV cache on Intel GPU";
+            return false;
+        }
+        std::cout << "[xinfer::Engine] Initialized KV cache (max_seq_len=" << config.max_seq_len
+                  << ", " << (kv_cache_->total_allocated_bytes() / (1024 * 1024)) << " MB VRAM)" << std::endl;
+
         is_loaded_ = true;
         return true;
     }
 
     bool is_loaded() const noexcept {
-        return is_loaded_ && model_ != nullptr;
+        return is_loaded_ && model_ != nullptr && kv_cache_ != nullptr;
     }
 
     GenerationResult generate(const std::string& prompt,
@@ -98,37 +109,53 @@ public:
 
         result.prompt_tokens = token_seq.size();
 
+        // 1. Prefill prompt (supports chunking via config_.prefill_chunk_size)
         auto t0 = std::chrono::high_resolution_clock::now();
-        std::chrono::high_resolution_clock::time_point t_first = t0;
-        bool has_first_token = false;
+        int64_t current_tok = targets::qwen3_8::prefill_prompt(
+            ctx_, *arena_, *model_, *kv_cache_, token_seq, config_.prefill_chunk_size);
 
-        // Autoregressive decode loop
-        for (int step = 0; step < gen_config.max_new_tokens; ++step) {
-            // Forward pass: evaluate current sequence and get next greedy token ID
-            int64_t next_tok = targets::qwen3_8::forward_next_token(ctx_, *arena_, *model_, token_seq);
+        auto t_first = std::chrono::high_resolution_clock::now();
+        result.time_to_first_token_sec = std::chrono::duration<double>(t_first - t0).count();
 
-            if (!has_first_token) {
-                t_first = std::chrono::high_resolution_clock::now();
-                has_first_token = true;
+        // Check for stop tokens on first token
+        if (current_tok == gen_config.eos_token_id || current_tok == gen_config.im_end_token_id) {
+            result.generated_tokens = 0;
+            result.total_time_sec = result.time_to_first_token_sec;
+            return result;
+        }
+
+        result.token_ids.push_back(current_tok);
+        std::string first_piece = tokenizer_.decode_token(current_tok);
+        result.text += first_piece;
+
+        if (callback) {
+            if (!callback(first_piece, current_tok)) {
+                result.generated_tokens = 1;
+                result.total_time_sec = result.time_to_first_token_sec;
+                return result;
             }
+        }
 
-            // Check for EOS / stop tokens
+        // 2. Autoregressive single-token decode loop using persistent KV cache
+        for (int step = 1; step < gen_config.max_new_tokens; ++step) {
+            int64_t next_tok = targets::qwen3_8::decode_step(
+                ctx_, *arena_, *model_, *kv_cache_, current_tok);
+
             if (next_tok == gen_config.eos_token_id || next_tok == gen_config.im_end_token_id) {
                 break;
             }
 
-            token_seq.push_back(next_tok);
             result.token_ids.push_back(next_tok);
-
             std::string piece = tokenizer_.decode_token(next_tok);
             result.text += piece;
 
             if (callback) {
-                bool keep_going = callback(piece, next_tok);
-                if (!keep_going) {
+                if (!callback(piece, next_tok)) {
                     break;
                 }
             }
+
+            current_tok = next_tok;
         }
 
         auto t_end = std::chrono::high_resolution_clock::now();
@@ -136,18 +163,18 @@ public:
         result.generated_tokens = result.token_ids.size();
         result.total_time_sec = std::chrono::duration<double>(t_end - t0).count();
 
-        if (has_first_token) {
-            result.time_to_first_token_sec = std::chrono::duration<double>(t_first - t0).count();
-            double decode_time = std::chrono::duration<double>(t_end - t_first).count();
-            if (decode_time > 0.0 && result.generated_tokens > 1) {
-                result.decode_tokens_per_sec = static_cast<double>(result.generated_tokens - 1) / decode_time;
-            }
+        double decode_time = std::chrono::duration<double>(t_end - t_first).count();
+        if (decode_time > 0.0 && result.generated_tokens > 1) {
+            result.decode_tokens_per_sec = static_cast<double>(result.generated_tokens - 1) / decode_time;
         }
 
         return result;
     }
 
     void reset() {
+        if (kv_cache_) {
+            kv_cache_->clear();
+        }
         if (arena_) {
             arena_->reset();
         }
@@ -157,6 +184,7 @@ private:
     std::shared_ptr<core::DeviceContext> ctx_;
     std::unique_ptr<targets::qwen3_8_27b::LoadedModel> model_;
     std::unique_ptr<core::DeviceArena> arena_;
+    std::unique_ptr<core::KVCache> kv_cache_;
     targets::qwen3_8::QwenTokenizer tokenizer_;
     EngineConfig config_;
     bool is_loaded_{false};
