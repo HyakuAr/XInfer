@@ -72,8 +72,7 @@ public:
         arena_ = std::make_unique<core::DeviceArena>(ctx_, config.arena_capacity_bytes);
 
         // 6. Initialize persistent KV cache and recurrent states
-        core::KVCacheConfig kv_cfg;
-        kv_cfg.max_seq_len = config.max_seq_len;
+        core::KVCacheConfig kv_cfg = model_->config().create_kv_cache_config(config.max_seq_len);
         kv_cache_ = std::make_unique<core::KVCache>(ctx_, kv_cfg);
         if (!kv_cache_->allocate()) {
             if (error_msg) *error_msg = "Failed to allocate KV cache on Intel GPU";

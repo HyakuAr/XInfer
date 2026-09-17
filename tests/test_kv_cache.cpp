@@ -20,6 +20,11 @@ int main() {
     config.num_linear_layers = 48;
     config.num_kv_heads = 4;
     config.head_dim = 256;
+    config.linear_num_v_heads = 48;
+    config.linear_head_k_dim = 128;
+    config.linear_head_v_dim = 128;
+    config.linear_conv_channels = 10240;
+    config.linear_conv_kernel_dim = 4;
 
     xinfer::core::KVCache cache(ctx, config);
     if (!cache.allocate()) {
@@ -44,6 +49,23 @@ int main() {
         }
     }
     std::cout << "[PASS] Verified all 16 full-attention and 48 linear-attention pointers\n";
+
+    // Verify out-of-range throws std::out_of_range
+    try {
+        cache.k_cache(16);
+        std::cerr << "FAILED: k_cache(16) did not throw out_of_range\n";
+        return 1;
+    } catch (const std::out_of_range&) {
+        std::cout << "[PASS] k_cache(16) correctly threw std::out_of_range\n";
+    }
+
+    try {
+        cache.linear_state(48);
+        std::cerr << "FAILED: linear_state(48) did not throw out_of_range\n";
+        return 1;
+    } catch (const std::out_of_range&) {
+        std::cout << "[PASS] linear_state(48) correctly threw std::out_of_range\n";
+    }
 
     // Test attention write and cached SDPA
     auto& q = ctx->queue();

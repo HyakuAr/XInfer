@@ -38,15 +38,15 @@ int main() {
     auto model = targets::qwen3_8_27b::LoadedModel::load_from_artifact(ctx, reader);
     std::cout << "Model loaded into B60 VRAM." << std::endl;
 
+    const auto& config = model->config();
     core::DeviceArena arena(ctx, 256 * 1024 * 1024);
-    core::KVCacheConfig cfg;
-    cfg.max_seq_len = 8192;
+    core::KVCacheConfig cfg = config.create_kv_cache_config(8192);
     core::KVCache kv_cache(ctx, cfg);
     kv_cache.allocate();
 
-    constexpr int64_t vocab_size = 248320;
-    constexpr int64_t hidden_size = 5120;
-    constexpr int64_t intermediate_size = 17408;
+    const int64_t vocab_size = config.vocab_size;
+    const int64_t hidden_size = config.hidden_size;
+    const int64_t intermediate_size = config.intermediate_size;
 
     // Fixed USM allocations for decode step
     int64_t* d_token_ids = sycl::malloc_device<int64_t>(1, q);
@@ -60,18 +60,18 @@ int main() {
     float* act_mlp_gate = sycl::malloc_device<float>(intermediate_size, q);
     float* act_mlp_up   = sycl::malloc_device<float>(intermediate_size, q);
 
-    float* act_q_gate   = sycl::malloc_device<float>(12288, q);
-    float* act_q        = sycl::malloc_device<float>(6144, q);
-    float* act_k        = sycl::malloc_device<float>(1024, q);
-    float* act_v        = sycl::malloc_device<float>(1024, q);
-    float* act_attn_out = sycl::malloc_device<float>(6144, q);
+    float* act_q_gate   = sycl::malloc_device<float>(config.full_q_gate_dim(), q);
+    float* act_q        = sycl::malloc_device<float>(config.full_q_dim(), q);
+    float* act_k        = sycl::malloc_device<float>(config.full_k_dim(), q);
+    float* act_v        = sycl::malloc_device<float>(config.full_v_dim(), q);
+    float* act_attn_out = sycl::malloc_device<float>(config.full_out_dim(), q);
 
-    float* act_qkv_raw   = sycl::malloc_device<float>(10240, q);
-    float* act_qkv_conv  = sycl::malloc_device<float>(10240, q);
-    float* act_z         = sycl::malloc_device<float>(6144, q);
-    float* act_b         = sycl::malloc_device<float>(48, q);
-    float* act_a         = sycl::malloc_device<float>(48, q);
-    float* act_delta_out = sycl::malloc_device<float>(6144, q);
+    float* act_qkv_raw   = sycl::malloc_device<float>(config.linear_conv_channels, q);
+    float* act_qkv_conv  = sycl::malloc_device<float>(config.linear_conv_channels, q);
+    float* act_z         = sycl::malloc_device<float>(config.linear_z_dim, q);
+    float* act_b         = sycl::malloc_device<float>(config.linear_b_dim, q);
+    float* act_a         = sycl::malloc_device<float>(config.linear_a_dim, q);
+    float* act_delta_out = sycl::malloc_device<float>(config.linear_out_dim(), q);
 
     int64_t cur_pos = 10;
     int64_t token_val = 1234;
@@ -87,10 +87,26 @@ int main() {
         // 1. Embedding lookup
         targets::qwen3_8::embed_tokens_lookup(q, act_x, model->d_embed_tokens(), d_token_ids, 1, hidden_size);
 
-        // 2. Loop over 64 layers
+        // 2. Loop over layers
         const auto& layers = model->layers();
         size_t full_idx = 0;
         size_t linear_idx = 0;
+
+        const int64_t num_q_heads = config.num_attention_heads;
+        const int64_t num_kv_heads = config.num_key_value_heads;
+        const int64_t head_dim = config.head_dim;
+        const int64_t full_q_gate_dim = config.full_q_gate_dim();
+        const int64_t full_k_dim = config.full_k_dim();
+        const int64_t full_v_dim = config.full_v_dim();
+        const int64_t full_out_dim = config.full_out_dim();
+        const float rope_theta = config.rope_theta;
+        const int64_t rope_dim = config.rope_dim;
+
+        const int64_t linear_conv_channels = config.linear_conv_channels;
+        const int64_t linear_z_dim = config.linear_z_dim;
+        const int64_t linear_b_dim = config.linear_b_dim;
+        const int64_t linear_a_dim = config.linear_a_dim;
+        const int64_t linear_out_dim = config.linear_out_dim();
 
         for (size_t l = 0; l < layers.size(); ++l) {
             const auto& layer = layers[l];
@@ -101,68 +117,68 @@ int main() {
                 ops::linear_int4(q, act_q_gate, act_normed,
                                  static_cast<const uint8_t*>(layer.q_proj.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.q_proj.d_scales),
-                                 nullptr, 1, 12288, hidden_size);
+                                 nullptr, 1, full_q_gate_dim, hidden_size);
                 ops::linear_int4(q, act_k, act_normed,
                                  static_cast<const uint8_t*>(layer.k_proj.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.k_proj.d_scales),
-                                 nullptr, 1, 1024, hidden_size);
+                                 nullptr, 1, full_k_dim, hidden_size);
                 ops::linear_int4(q, act_v, act_normed,
                                  static_cast<const uint8_t*>(layer.v_proj.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.v_proj.d_scales),
-                                 nullptr, 1, 1024, hidden_size);
+                                 nullptr, 1, full_v_dim, hidden_size);
 
-                q.parallel_for(sycl::range<2>(1, 24), [=](sycl::id<2> idx) {
+                q.parallel_for(sycl::range<2>(1, num_q_heads), [=](sycl::id<2> idx) {
                     int64_t t = idx[0];
                     int64_t h = idx[1];
-                    for (int d = 0; d < 256; ++d) {
-                        act_q[(t * 24 + h) * 256 + d] = act_q_gate[t * 12288 + h * 512 + d];
+                    for (int d = 0; d < head_dim; ++d) {
+                        act_q[(t * num_q_heads + h) * head_dim + d] = act_q_gate[t * full_q_gate_dim + h * (2 * head_dim) + d];
                     }
                 });
 
-                ops::rmsnorm(q, act_q, act_q, layer.d_q_norm, 24, 256);
-                ops::rmsnorm(q, act_k, act_k, layer.d_k_norm, 4, 256);
+                ops::rmsnorm(q, act_q, act_q, layer.d_q_norm, num_q_heads, head_dim);
+                ops::rmsnorm(q, act_k, act_k, layer.d_k_norm, num_kv_heads, head_dim);
 
-                ops::rope(q, act_q, act_k, 1, 24, 4, 256, d_positions, 10000000.0f, 64);
+                ops::rope(q, act_q, act_k, 1, num_q_heads, num_kv_heads, head_dim, d_positions, rope_theta, rope_dim);
 
                 ops::attention_write_kv_cache(q, kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
-                                              act_k, act_v, cur_pos, 1, 4, 256);
+                                              act_k, act_v, cur_pos, 1, num_kv_heads, head_dim);
 
                 ops::sdpa_causal_cached(q, act_attn_out, act_q,
                                         kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
-                                        cur_pos, 1, 24, 4, 256);
+                                        cur_pos, 1, num_q_heads, num_kv_heads, head_dim);
 
-                q.parallel_for(sycl::range<2>(1, 24), [=](sycl::id<2> idx) {
+                q.parallel_for(sycl::range<2>(1, num_q_heads), [=](sycl::id<2> idx) {
                     int64_t t = idx[0];
                     int64_t h = idx[1];
-                    for (int d = 0; d < 256; ++d) {
-                        float gate_val = act_q_gate[t * 12288 + h * 512 + 256 + d];
+                    for (int d = 0; d < head_dim; ++d) {
+                        float gate_val = act_q_gate[t * full_q_gate_dim + h * (2 * head_dim) + head_dim + d];
                         float sig = 1.0f / (1.0f + sycl::exp(-gate_val));
-                        act_attn_out[(t * 24 + h) * 256 + d] *= sig;
+                        act_attn_out[(t * num_q_heads + h) * head_dim + d] *= sig;
                     }
                 });
 
                 ops::linear_int4(q, act_proj_out, act_attn_out,
                                  static_cast<const uint8_t*>(layer.o_proj.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.o_proj.d_scales),
-                                 nullptr, 1, hidden_size, 6144);
+                                 nullptr, 1, hidden_size, full_out_dim);
                 full_idx++;
             } else {
                 ops::linear_int4(q, act_qkv_raw, act_normed,
                                  static_cast<const uint8_t*>(layer.in_proj_qkv.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.in_proj_qkv.d_scales),
-                                 nullptr, 1, 10240, hidden_size);
+                                 nullptr, 1, linear_conv_channels, hidden_size);
                 ops::linear_int4(q, act_z, act_normed,
                                  static_cast<const uint8_t*>(layer.in_proj_z.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.in_proj_z.d_scales),
-                                 nullptr, 1, 6144, hidden_size);
+                                 nullptr, 1, linear_z_dim, hidden_size);
                 ops::linear_int4(q, act_b, act_normed,
                                  static_cast<const uint8_t*>(layer.in_proj_b.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.in_proj_b.d_scales),
-                                 nullptr, 1, 48, hidden_size);
+                                 nullptr, 1, linear_b_dim, hidden_size);
                 ops::linear_int4(q, act_a, act_normed,
                                  static_cast<const uint8_t*>(layer.in_proj_a.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.in_proj_a.d_scales),
-                                 nullptr, 1, 48, hidden_size);
+                                 nullptr, 1, linear_a_dim, hidden_size);
 
                 targets::qwen3_8::causal_conv1d_silu(q, act_qkv_conv, act_qkv_raw, layer.d_conv1d_weight, 1,
                                                      kv_cache.conv_state(linear_idx));
@@ -174,7 +190,7 @@ int main() {
                 ops::linear_int4(q, act_proj_out, act_delta_out,
                                  static_cast<const uint8_t*>(layer.out_proj.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.out_proj.d_scales),
-                                 nullptr, 1, hidden_size, 6144);
+                                 nullptr, 1, hidden_size, linear_out_dim);
                 linear_idx++;
             }
 

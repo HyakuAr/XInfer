@@ -33,9 +33,10 @@ DecodeGraph::DecodeGraph(std::shared_ptr<core::DeviceContext> ctx,
     : ctx_(std::move(ctx)), model_(model), kv_cache_(kv_cache) {
     sycl::queue& q = ctx_->queue();
 
-    constexpr int64_t vocab_size = 248320;
-    constexpr int64_t hidden_size = 5120;
-    constexpr int64_t intermediate_size = 17408;
+    const auto& cfg = model_.config();
+    const int64_t vocab_size = cfg.vocab_size;
+    const int64_t hidden_size = cfg.hidden_size;
+    const int64_t intermediate_size = cfg.intermediate_size;
 
     // Allocate fixed USM device memory pointers with guaranteed address stability
     d_token_ids_ = sycl::malloc_device<int64_t>(1, q);
@@ -48,18 +49,18 @@ DecodeGraph::DecodeGraph(std::shared_ptr<core::DeviceContext> ctx,
     act_mlp_gate_ = sycl::malloc_device<float>(intermediate_size, q);
     act_mlp_up_   = sycl::malloc_device<float>(intermediate_size, q);
 
-    act_q_gate_   = sycl::malloc_device<float>(12288, q);
-    act_q_        = sycl::malloc_device<float>(6144, q);
-    act_k_        = sycl::malloc_device<float>(1024, q);
-    act_v_        = sycl::malloc_device<float>(1024, q);
-    act_attn_out_ = sycl::malloc_device<float>(6144, q);
+    act_q_gate_   = sycl::malloc_device<float>(cfg.full_q_gate_dim(), q);
+    act_q_        = sycl::malloc_device<float>(cfg.full_q_dim(), q);
+    act_k_        = sycl::malloc_device<float>(cfg.full_k_dim(), q);
+    act_v_        = sycl::malloc_device<float>(cfg.full_v_dim(), q);
+    act_attn_out_ = sycl::malloc_device<float>(cfg.full_out_dim(), q);
 
-    act_qkv_raw_   = sycl::malloc_device<float>(10240, q);
-    act_qkv_conv_  = sycl::malloc_device<float>(10240, q);
-    act_z_         = sycl::malloc_device<float>(6144, q);
-    act_b_         = sycl::malloc_device<float>(48, q);
-    act_a_         = sycl::malloc_device<float>(48, q);
-    act_delta_out_ = sycl::malloc_device<float>(6144, q);
+    act_qkv_raw_   = sycl::malloc_device<float>(cfg.linear_conv_channels, q);
+    act_qkv_conv_  = sycl::malloc_device<float>(cfg.linear_conv_channels, q);
+    act_z_         = sycl::malloc_device<float>(cfg.linear_z_dim, q);
+    act_b_         = sycl::malloc_device<float>(cfg.linear_b_dim, q);
+    act_a_         = sycl::malloc_device<float>(cfg.linear_a_dim, q);
+    act_delta_out_ = sycl::malloc_device<float>(cfg.linear_z_dim, q);
 }
 
 DecodeGraph::~DecodeGraph() {
@@ -99,9 +100,10 @@ bool DecodeGraph::capture() {
         return false;
     }
 
-    constexpr int64_t vocab_size = 248320;
-    constexpr int64_t hidden_size = 5120;
-    constexpr int64_t intermediate_size = 17408;
+    const auto& cfg = model_.config();
+    const int64_t vocab_size = cfg.vocab_size;
+    const int64_t hidden_size = cfg.hidden_size;
+    const int64_t intermediate_size = cfg.intermediate_size;
 
     int64_t initial_token = 0;
     int64_t initial_pos = 0;
@@ -116,7 +118,7 @@ bool DecodeGraph::capture() {
         // 1. Embedding lookup
         embed_tokens_lookup(q, act_x_, model_.d_embed_tokens(), d_token_ids_, 1, hidden_size);
 
-        // 2. Loop over 64 layers
+        // 2. Loop over layers
         const auto& layers = model_.layers();
         size_t full_idx = 0;
         size_t linear_idx = 0;
@@ -130,75 +132,78 @@ bool DecodeGraph::capture() {
                 ops::linear_int4(q, act_q_gate_, act_normed_,
                                  static_cast<const uint8_t*>(layer.q_proj.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.q_proj.d_scales),
-                                 nullptr, 1, 12288, hidden_size);
+                                 nullptr, 1, cfg.full_q_gate_dim(), hidden_size);
                 ops::linear_int4(q, act_k_, act_normed_,
                                  static_cast<const uint8_t*>(layer.k_proj.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.k_proj.d_scales),
-                                 nullptr, 1, 1024, hidden_size);
+                                 nullptr, 1, cfg.full_k_dim(), hidden_size);
                 ops::linear_int4(q, act_v_, act_normed_,
                                  static_cast<const uint8_t*>(layer.v_proj.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.v_proj.d_scales),
-                                 nullptr, 1, 1024, hidden_size);
+                                 nullptr, 1, cfg.full_v_dim(), hidden_size);
 
                 float* q_ptr = act_q_;
                 float* q_gate_ptr = act_q_gate_;
                 float* attn_out_ptr = act_attn_out_;
+                int64_t num_q_heads = cfg.num_attention_heads;
+                int64_t head_dim = cfg.head_dim;
+                int64_t q_gate_dim = cfg.full_q_gate_dim();
 
-                q.parallel_for(sycl::range<2>(1, 24), [=](sycl::id<2> idx) {
+                q.parallel_for(sycl::range<2>(1, num_q_heads), [=](sycl::id<2> idx) {
                     int64_t t = idx[0];
                     int64_t h = idx[1];
-                    for (int d = 0; d < 256; ++d) {
-                        q_ptr[(t * 24 + h) * 256 + d] = q_gate_ptr[t * 12288 + h * 512 + d];
+                    for (int d = 0; d < head_dim; ++d) {
+                        q_ptr[(t * num_q_heads + h) * head_dim + d] = q_gate_ptr[t * q_gate_dim + h * 2 * head_dim + d];
                     }
                 });
 
-                ops::rmsnorm(q, act_q_, act_q_, layer.d_q_norm, 24, 256);
-                ops::rmsnorm(q, act_k_, act_k_, layer.d_k_norm, 4, 256);
+                ops::rmsnorm(q, act_q_, act_q_, layer.d_q_norm, num_q_heads, head_dim);
+                ops::rmsnorm(q, act_k_, act_k_, layer.d_k_norm, cfg.num_key_value_heads, head_dim);
 
-                ops::rope(q, act_q_, act_k_, 1, 24, 4, 256, d_positions_, 10000000.0f, 64);
+                ops::rope(q, act_q_, act_k_, 1, num_q_heads, cfg.num_key_value_heads, head_dim, d_positions_, cfg.rope_theta, cfg.rope_dim);
 
                 // Use d_positions_ as dynamic device pointer for KV-cache write and SDPA
                 ops::attention_write_kv_cache_dynamic(q, kv_cache_.k_cache(full_idx), kv_cache_.v_cache(full_idx),
-                                                      act_k_, act_v_, d_positions_, 1, 4, 256,
+                                                      act_k_, act_v_, d_positions_, 1, cfg.num_key_value_heads, head_dim,
                                                       static_cast<int64_t>(kv_cache_.max_seq_len()));
 
                 ops::sdpa_causal_cached_dynamic(q, act_attn_out_, act_q_,
                                                 kv_cache_.k_cache(full_idx), kv_cache_.v_cache(full_idx),
-                                                d_positions_, 1, 24, 4, 256, 0.0f,
+                                                d_positions_, 1, num_q_heads, cfg.num_key_value_heads, head_dim, 0.0f,
                                                 static_cast<int64_t>(kv_cache_.max_seq_len()));
 
-                q.parallel_for(sycl::range<2>(1, 24), [=](sycl::id<2> idx) {
+                q.parallel_for(sycl::range<2>(1, num_q_heads), [=](sycl::id<2> idx) {
                     int64_t t = idx[0];
                     int64_t h = idx[1];
-                    for (int d = 0; d < 256; ++d) {
-                        float gate_val = q_gate_ptr[t * 12288 + h * 512 + 256 + d];
+                    for (int d = 0; d < head_dim; ++d) {
+                        float gate_val = q_gate_ptr[t * q_gate_dim + h * 2 * head_dim + head_dim + d];
                         float sig = 1.0f / (1.0f + sycl::exp(-gate_val));
-                        attn_out_ptr[(t * 24 + h) * 256 + d] *= sig;
+                        attn_out_ptr[(t * num_q_heads + h) * head_dim + d] *= sig;
                     }
                 });
 
                 ops::linear_int4(q, act_proj_out_, act_attn_out_,
                                  static_cast<const uint8_t*>(layer.o_proj.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.o_proj.d_scales),
-                                 nullptr, 1, hidden_size, 6144);
+                                 nullptr, 1, hidden_size, cfg.full_out_dim());
                 full_idx++;
             } else {
                 ops::linear_int4(q, act_qkv_raw_, act_normed_,
                                  static_cast<const uint8_t*>(layer.in_proj_qkv.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.in_proj_qkv.d_scales),
-                                 nullptr, 1, 10240, hidden_size);
+                                 nullptr, 1, cfg.linear_conv_channels, hidden_size);
                 ops::linear_int4(q, act_z_, act_normed_,
                                  static_cast<const uint8_t*>(layer.in_proj_z.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.in_proj_z.d_scales),
-                                 nullptr, 1, 6144, hidden_size);
+                                 nullptr, 1, cfg.linear_z_dim, hidden_size);
                 ops::linear_int4(q, act_b_, act_normed_,
                                  static_cast<const uint8_t*>(layer.in_proj_b.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.in_proj_b.d_scales),
-                                 nullptr, 1, 48, hidden_size);
+                                 nullptr, 1, cfg.linear_b_dim, hidden_size);
                 ops::linear_int4(q, act_a_, act_normed_,
                                  static_cast<const uint8_t*>(layer.in_proj_a.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.in_proj_a.d_scales),
-                                 nullptr, 1, 48, hidden_size);
+                                 nullptr, 1, cfg.linear_a_dim, hidden_size);
 
                 causal_conv1d_silu(q, act_qkv_conv_, act_qkv_raw_, layer.d_conv1d_weight, 1,
                                    kv_cache_.conv_state(linear_idx));
@@ -210,7 +215,7 @@ bool DecodeGraph::capture() {
                 ops::linear_int4(q, act_proj_out_, act_delta_out_,
                                  static_cast<const uint8_t*>(layer.out_proj.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.out_proj.d_scales),
-                                 nullptr, 1, hidden_size, 6144);
+                                 nullptr, 1, hidden_size, cfg.linear_z_dim);
                 linear_idx++;
             }
 
@@ -281,8 +286,7 @@ int64_t DecodeGraph::decode_step(int64_t input_token_id, size_t cur_pos) {
     q.ext_oneapi_graph(*exec_graph_);
 
     // Greedy sampling from logits
-    constexpr int64_t vocab_size = 248320;
-    int64_t next_token = ops::argmax(q, d_logits_, vocab_size);
+    int64_t next_token = ops::argmax(q, d_logits_, model_.config().vocab_size);
     return next_token;
 }
 

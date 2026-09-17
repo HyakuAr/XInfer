@@ -50,9 +50,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    constexpr int64_t vocab_size = 248320;
-    constexpr int64_t hidden_size = 5120;
-    constexpr int64_t intermediate_size = 17408;
+    const auto& cfg = model->config();
+    const int64_t vocab_size = cfg.vocab_size;
+    const int64_t hidden_size = cfg.hidden_size;
+    const int64_t intermediate_size = cfg.intermediate_size;
 
     // Allocate activation buffers
     float* act_x        = sycl::malloc_device<float>(hidden_size, q);
@@ -61,16 +62,16 @@ int main(int argc, char** argv) {
     float* act_mlp_gate = sycl::malloc_device<float>(intermediate_size, q);
     float* act_mlp_up   = sycl::malloc_device<float>(intermediate_size, q);
 
-    float* act_q_gate   = sycl::malloc_device<float>(12288, q);
-    float* act_k        = sycl::malloc_device<float>(1024, q);
-    float* act_v        = sycl::malloc_device<float>(1024, q);
-    float* act_attn_out = sycl::malloc_device<float>(6144, q);
+    float* act_q_gate   = sycl::malloc_device<float>(cfg.full_q_gate_dim(), q);
+    float* act_k        = sycl::malloc_device<float>(cfg.full_k_dim(), q);
+    float* act_v        = sycl::malloc_device<float>(cfg.full_v_dim(), q);
+    float* act_attn_out = sycl::malloc_device<float>(cfg.full_out_dim(), q);
 
-    float* act_qkv_raw   = sycl::malloc_device<float>(10240, q);
-    float* act_z         = sycl::malloc_device<float>(6144, q);
-    float* act_b         = sycl::malloc_device<float>(48, q);
-    float* act_a         = sycl::malloc_device<float>(48, q);
-    float* act_delta_out = sycl::malloc_device<float>(6144, q);
+    float* act_qkv_raw   = sycl::malloc_device<float>(cfg.linear_conv_channels, q);
+    float* act_z         = sycl::malloc_device<float>(cfg.linear_z_dim, q);
+    float* act_b         = sycl::malloc_device<float>(cfg.linear_b_dim, q);
+    float* act_a         = sycl::malloc_device<float>(cfg.linear_a_dim, q);
+    float* act_delta_out = sycl::malloc_device<float>(cfg.linear_z_dim, q);
     float* d_logits      = sycl::malloc_device<float>(vocab_size, q);
 
     q.memset(act_x, 0, hidden_size * sizeof(float)).wait();
@@ -94,18 +95,18 @@ int main(int argc, char** argv) {
     };
 
     std::vector<ProjectionMetrics> projs(NUM_PROJ_TYPES);
-    projs[P_MLP_GATE]   = {"MLP Gate",           intermediate_size, hidden_size, 64, {}};
-    projs[P_MLP_UP]     = {"MLP Up",             intermediate_size, hidden_size, 64, {}};
-    projs[P_MLP_DOWN]   = {"MLP Down",           hidden_size, intermediate_size, 64, {}};
-    projs[P_FA_Q]       = {"Full-Attn Q",        12288, hidden_size, 16, {}};
-    projs[P_FA_K]       = {"Full-Attn K",        1024,  hidden_size, 16, {}};
-    projs[P_FA_V]       = {"Full-Attn V",        1024,  hidden_size, 16, {}};
-    projs[P_FA_OUT]     = {"Full-Attn Out",      hidden_size, 6144, 16, {}};
-    projs[P_LA_QKV]     = {"Linear-Attn QKV",    10240, hidden_size, 48, {}};
-    projs[P_LA_Z]       = {"Linear-Attn Z",      6144,  hidden_size, 48, {}};
-    projs[P_LA_B]       = {"Linear-Attn B",      48,    hidden_size, 48, {}};
-    projs[P_LA_A]       = {"Linear-Attn A",      48,    hidden_size, 48, {}};
-    projs[P_LA_OUT]     = {"Linear-Attn Out",    hidden_size, 6144, 48, {}};
+    projs[P_MLP_GATE]   = {"MLP Gate",           intermediate_size, hidden_size, static_cast<int>(cfg.num_hidden_layers), {}};
+    projs[P_MLP_UP]     = {"MLP Up",             intermediate_size, hidden_size, static_cast<int>(cfg.num_hidden_layers), {}};
+    projs[P_MLP_DOWN]   = {"MLP Down",           hidden_size, intermediate_size, static_cast<int>(cfg.num_hidden_layers), {}};
+    projs[P_FA_Q]       = {"Full-Attn Q",        cfg.full_q_gate_dim(), hidden_size, static_cast<int>(cfg.num_full_layers()), {}};
+    projs[P_FA_K]       = {"Full-Attn K",        cfg.full_k_dim(),  hidden_size, static_cast<int>(cfg.num_full_layers()), {}};
+    projs[P_FA_V]       = {"Full-Attn V",        cfg.full_v_dim(),  hidden_size, static_cast<int>(cfg.num_full_layers()), {}};
+    projs[P_FA_OUT]     = {"Full-Attn Out",      hidden_size, cfg.full_out_dim(), static_cast<int>(cfg.num_full_layers()), {}};
+    projs[P_LA_QKV]     = {"Linear-Attn QKV",    cfg.linear_conv_channels, hidden_size, static_cast<int>(cfg.num_linear_layers()), {}};
+    projs[P_LA_Z]       = {"Linear-Attn Z",      cfg.linear_z_dim,  hidden_size, static_cast<int>(cfg.num_linear_layers()), {}};
+    projs[P_LA_B]       = {"Linear-Attn B",      cfg.linear_b_dim,    hidden_size, static_cast<int>(cfg.num_linear_layers()), {}};
+    projs[P_LA_A]       = {"Linear-Attn A",      cfg.linear_a_dim,    hidden_size, static_cast<int>(cfg.num_linear_layers()), {}};
+    projs[P_LA_OUT]     = {"Linear-Attn Out",    hidden_size, cfg.linear_z_dim, static_cast<int>(cfg.num_linear_layers()), {}};
     projs[P_LM_HEAD]    = {"LM Head",            vocab_size, hidden_size, 1, {}};
 
     for (auto& p : projs) {
@@ -121,7 +122,8 @@ int main(int argc, char** argv) {
         q.wait();
     }
 
-    std::cout << "Profiling all 497 INT4 linear projections across all 64 layers..." << std::endl;
+    std::cout << "Profiling all " << ((cfg.num_hidden_layers * 3) + (cfg.num_full_layers() * 4) + (cfg.num_linear_layers() * 5) + 1)
+              << " INT4 linear projections across all " << cfg.num_hidden_layers << " layers..." << std::endl;
 
     q.wait();
     const auto& layers = model->layers();
@@ -135,28 +137,28 @@ int main(int argc, char** argv) {
                 ops::linear_int4(q, act_q_gate, act_normed,
                                  static_cast<const uint8_t*>(layer.q_proj.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.q_proj.d_scales),
-                                 nullptr, 1, 12288, hidden_size)
+                                 nullptr, 1, cfg.full_q_gate_dim(), hidden_size)
             );
             // K proj
             projs[P_FA_K].events.push_back(
                 ops::linear_int4(q, act_k, act_normed,
                                  static_cast<const uint8_t*>(layer.k_proj.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.k_proj.d_scales),
-                                 nullptr, 1, 1024, hidden_size)
+                                 nullptr, 1, cfg.full_k_dim(), hidden_size)
             );
             // V proj
             projs[P_FA_V].events.push_back(
                 ops::linear_int4(q, act_v, act_normed,
                                  static_cast<const uint8_t*>(layer.v_proj.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.v_proj.d_scales),
-                                 nullptr, 1, 1024, hidden_size)
+                                 nullptr, 1, cfg.full_v_dim(), hidden_size)
             );
             // Out proj
             projs[P_FA_OUT].events.push_back(
                 ops::linear_int4(q, act_proj_out, act_attn_out,
                                  static_cast<const uint8_t*>(layer.o_proj.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.o_proj.d_scales),
-                                 nullptr, 1, hidden_size, 6144)
+                                 nullptr, 1, hidden_size, cfg.full_out_dim())
             );
         } else {
             // QKV proj
@@ -164,35 +166,35 @@ int main(int argc, char** argv) {
                 ops::linear_int4(q, act_qkv_raw, act_normed,
                                  static_cast<const uint8_t*>(layer.in_proj_qkv.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.in_proj_qkv.d_scales),
-                                 nullptr, 1, 10240, hidden_size)
+                                 nullptr, 1, cfg.linear_conv_channels, hidden_size)
             );
             // Z proj
             projs[P_LA_Z].events.push_back(
                 ops::linear_int4(q, act_z, act_normed,
                                  static_cast<const uint8_t*>(layer.in_proj_z.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.in_proj_z.d_scales),
-                                 nullptr, 1, 6144, hidden_size)
+                                 nullptr, 1, cfg.linear_z_dim, hidden_size)
             );
             // B proj
             projs[P_LA_B].events.push_back(
                 ops::linear_int4(q, act_b, act_normed,
                                  static_cast<const uint8_t*>(layer.in_proj_b.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.in_proj_b.d_scales),
-                                 nullptr, 1, 48, hidden_size)
+                                 nullptr, 1, cfg.linear_b_dim, hidden_size)
             );
             // A proj
             projs[P_LA_A].events.push_back(
                 ops::linear_int4(q, act_a, act_normed,
                                  static_cast<const uint8_t*>(layer.in_proj_a.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.in_proj_a.d_scales),
-                                 nullptr, 1, 48, hidden_size)
+                                 nullptr, 1, cfg.linear_a_dim, hidden_size)
             );
             // Out proj
             projs[P_LA_OUT].events.push_back(
                 ops::linear_int4(q, act_proj_out, act_delta_out,
                                  static_cast<const uint8_t*>(layer.out_proj.d_weights_int4),
                                  static_cast<const sycl::half*>(layer.out_proj.d_scales),
-                                 nullptr, 1, hidden_size, 6144)
+                                 nullptr, 1, hidden_size, cfg.linear_z_dim)
             );
         }
 
@@ -246,7 +248,7 @@ int main(int argc, char** argv) {
 
         // Bytes calculations
         size_t w_bytes_per_op = static_cast<size_t>(p.N) * (p.K / 2);
-        size_t s_bytes_per_op = static_cast<size_t>(p.N) * (p.K / 128) * sizeof(sycl::half);
+        size_t s_bytes_per_op = static_cast<size_t>(p.N) * (p.K / cfg.group_size) * sizeof(sycl::half);
         size_t in_act_per_op  = static_cast<size_t>(p.K) * sizeof(float);
         size_t out_act_per_op = static_cast<size_t>(p.N) * sizeof(float);
 
@@ -261,6 +263,11 @@ int main(int argc, char** argv) {
         if (p.total_time_ms > 0.0) {
             p.achieved_bw_gbs = (static_cast<double>(p.total_bytes) / 1e9) / (p.total_time_ms / 1000.0);
         }
+    }
+
+    int total_ops_count = 0;
+    for (const auto& p : projs) {
+        total_ops_count += p.count;
     }
 
     std::cout << "\n=========================================================================================================================" << std::endl;
@@ -299,8 +306,8 @@ int main(int argc, char** argv) {
     double aggregate_bw = (static_cast<double>(grand_total_bytes) / 1e9) / (grand_total_time_ms / 1000.0);
     double aggregate_weight_bw = (static_cast<double>(grand_total_weight_bytes) / 1e9) / (grand_total_time_ms / 1000.0);
     std::cout << std::left << std::setw(18) << "TOTAL LINEAR GEMV"
-              << std::right << std::setw(14) << "All 13 Shapes"
-              << std::setw(7) << 497
+              << std::right << std::setw(14) << "All Projections"
+              << std::setw(7) << total_ops_count
               << std::fixed << std::setprecision(1) << std::setw(13) << (grand_total_bytes / (1024.0 * 1024.0))
               << std::setprecision(2) << std::setw(12) << grand_total_time_ms
               << std::setw(12) << "-"

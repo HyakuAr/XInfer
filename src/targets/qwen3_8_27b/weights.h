@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/device.h"
+#include "core/kv_cache.h"
 #include "artifact/reader.h"
 #include <string>
 #include <vector>
@@ -64,6 +65,55 @@ struct ModelConfig {
     int64_t vocab_size{248320};
     float   rms_norm_eps{1e-6f};
     float   rope_theta{10000000.0f};
+    int64_t rope_dim{64};
+    int     group_size{128};
+
+    // Linear attention channel dimensions
+    int64_t linear_conv_channels{10240};
+    int64_t linear_conv_kernel_dim{4};
+    int64_t linear_num_v_heads{48};
+    int64_t linear_head_k_dim{128};
+    int64_t linear_head_v_dim{128};
+    int64_t linear_z_dim{6144};
+    int64_t linear_b_dim{48};
+    int64_t linear_a_dim{48};
+    int64_t linear_norm_dim{128};
+
+    int64_t linear_out_dim() const noexcept { return linear_num_v_heads * linear_head_v_dim; } // 6144
+
+    // Full attention derived dimensions
+    int64_t full_q_gate_dim() const noexcept { return num_attention_heads * head_dim * 2; } // 12288
+    int64_t full_q_dim() const noexcept { return num_attention_heads * head_dim; }         // 6144
+    int64_t full_k_dim() const noexcept { return num_key_value_heads * head_dim; }         // 1024
+    int64_t full_v_dim() const noexcept { return num_key_value_heads * head_dim; }         // 1024
+    int64_t full_out_dim() const noexcept { return num_attention_heads * head_dim; }       // 6144
+
+    int64_t num_full_layers() const noexcept {
+        int64_t count = 0;
+        for (int64_t l = 0; l < num_hidden_layers; ++l) {
+            if (l % 4 == 3) count++;
+        }
+        return count;
+    }
+
+    int64_t num_linear_layers() const noexcept {
+        return num_hidden_layers - num_full_layers();
+    }
+
+    core::KVCacheConfig create_kv_cache_config(size_t max_seq_len = 8192) const noexcept {
+        core::KVCacheConfig cfg;
+        cfg.max_seq_len = max_seq_len;
+        cfg.num_full_layers = static_cast<size_t>(num_full_layers());
+        cfg.num_linear_layers = static_cast<size_t>(num_linear_layers());
+        cfg.num_kv_heads = static_cast<size_t>(num_key_value_heads);
+        cfg.head_dim = static_cast<size_t>(head_dim);
+        cfg.linear_num_v_heads = static_cast<size_t>(linear_num_v_heads);
+        cfg.linear_head_k_dim = static_cast<size_t>(linear_head_k_dim);
+        cfg.linear_head_v_dim = static_cast<size_t>(linear_head_v_dim);
+        cfg.linear_conv_channels = static_cast<size_t>(linear_conv_channels);
+        cfg.linear_conv_kernel_dim = static_cast<size_t>(linear_conv_kernel_dim);
+        return cfg;
+    }
 };
 
 class LoadedModel {

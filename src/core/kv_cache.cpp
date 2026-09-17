@@ -1,5 +1,7 @@
 #include "kv_cache.h"
 #include <iostream>
+#include <cassert>
+#include <stdexcept>
 
 namespace xinfer::core {
 
@@ -132,36 +134,84 @@ void KVCache::clear() {
     q.wait();
 }
 
-sycl::half* KVCache::k_cache(size_t full_layer_idx) noexcept {
-    return (full_layer_idx < k_caches_.size()) ? k_caches_[full_layer_idx] : nullptr;
+sycl::half* KVCache::k_cache(size_t full_layer_idx) {
+    if (full_layer_idx >= k_caches_.size()) {
+        throw std::out_of_range("KVCache::k_cache: full_layer_idx (" +
+                                std::to_string(full_layer_idx) + ") >= num_full_layers (" +
+                                std::to_string(k_caches_.size()) + ")");
+    }
+    assert(k_caches_[full_layer_idx] != nullptr);
+    return k_caches_[full_layer_idx];
 }
 
-const sycl::half* KVCache::k_cache(size_t full_layer_idx) const noexcept {
-    return (full_layer_idx < k_caches_.size()) ? k_caches_[full_layer_idx] : nullptr;
+const sycl::half* KVCache::k_cache(size_t full_layer_idx) const {
+    if (full_layer_idx >= k_caches_.size()) {
+        throw std::out_of_range("KVCache::k_cache: full_layer_idx (" +
+                                std::to_string(full_layer_idx) + ") >= num_full_layers (" +
+                                std::to_string(k_caches_.size()) + ")");
+    }
+    assert(k_caches_[full_layer_idx] != nullptr);
+    return k_caches_[full_layer_idx];
 }
 
-sycl::half* KVCache::v_cache(size_t full_layer_idx) noexcept {
-    return (full_layer_idx < v_caches_.size()) ? v_caches_[full_layer_idx] : nullptr;
+sycl::half* KVCache::v_cache(size_t full_layer_idx) {
+    if (full_layer_idx >= v_caches_.size()) {
+        throw std::out_of_range("KVCache::v_cache: full_layer_idx (" +
+                                std::to_string(full_layer_idx) + ") >= num_full_layers (" +
+                                std::to_string(v_caches_.size()) + ")");
+    }
+    assert(v_caches_[full_layer_idx] != nullptr);
+    return v_caches_[full_layer_idx];
 }
 
-const sycl::half* KVCache::v_cache(size_t full_layer_idx) const noexcept {
-    return (full_layer_idx < v_caches_.size()) ? v_caches_[full_layer_idx] : nullptr;
+const sycl::half* KVCache::v_cache(size_t full_layer_idx) const {
+    if (full_layer_idx >= v_caches_.size()) {
+        throw std::out_of_range("KVCache::v_cache: full_layer_idx (" +
+                                std::to_string(full_layer_idx) + ") >= num_full_layers (" +
+                                std::to_string(v_caches_.size()) + ")");
+    }
+    assert(v_caches_[full_layer_idx] != nullptr);
+    return v_caches_[full_layer_idx];
 }
 
-float* KVCache::linear_state(size_t linear_layer_idx) noexcept {
-    return (linear_layer_idx < linear_states_.size()) ? linear_states_[linear_layer_idx] : nullptr;
+float* KVCache::linear_state(size_t linear_layer_idx) {
+    if (linear_layer_idx >= linear_states_.size()) {
+        throw std::out_of_range("KVCache::linear_state: linear_layer_idx (" +
+                                std::to_string(linear_layer_idx) + ") >= num_linear_layers (" +
+                                std::to_string(linear_states_.size()) + ")");
+    }
+    assert(linear_states_[linear_layer_idx] != nullptr);
+    return linear_states_[linear_layer_idx];
 }
 
-const float* KVCache::linear_state(size_t linear_layer_idx) const noexcept {
-    return (linear_layer_idx < linear_states_.size()) ? linear_states_[linear_layer_idx] : nullptr;
+const float* KVCache::linear_state(size_t linear_layer_idx) const {
+    if (linear_layer_idx >= linear_states_.size()) {
+        throw std::out_of_range("KVCache::linear_state: linear_layer_idx (" +
+                                std::to_string(linear_layer_idx) + ") >= num_linear_layers (" +
+                                std::to_string(linear_states_.size()) + ")");
+    }
+    assert(linear_states_[linear_layer_idx] != nullptr);
+    return linear_states_[linear_layer_idx];
 }
 
-float* KVCache::conv_state(size_t linear_layer_idx) noexcept {
-    return (linear_layer_idx < conv_states_.size()) ? conv_states_[linear_layer_idx] : nullptr;
+float* KVCache::conv_state(size_t linear_layer_idx) {
+    if (linear_layer_idx >= conv_states_.size()) {
+        throw std::out_of_range("KVCache::conv_state: linear_layer_idx (" +
+                                std::to_string(linear_layer_idx) + ") >= num_linear_layers (" +
+                                std::to_string(conv_states_.size()) + ")");
+    }
+    assert(conv_states_[linear_layer_idx] != nullptr);
+    return conv_states_[linear_layer_idx];
 }
 
-const float* KVCache::conv_state(size_t linear_layer_idx) const noexcept {
-    return (linear_layer_idx < conv_states_.size()) ? conv_states_[linear_layer_idx] : nullptr;
+const float* KVCache::conv_state(size_t linear_layer_idx) const {
+    if (linear_layer_idx >= conv_states_.size()) {
+        throw std::out_of_range("KVCache::conv_state: linear_layer_idx (" +
+                                std::to_string(linear_layer_idx) + ") >= num_linear_layers (" +
+                                std::to_string(conv_states_.size()) + ")");
+    }
+    assert(conv_states_[linear_layer_idx] != nullptr);
+    return conv_states_[linear_layer_idx];
 }
 
 size_t KVCache::total_allocated_bytes() const noexcept {

@@ -66,8 +66,7 @@ int main(int argc, char** argv) {
     check_ptr_residency(lm_head_weights, "LM Head Weights");
 
     // Setup DecodeGraph
-    core::KVCacheConfig kv_cfg;
-    kv_cfg.max_seq_len = 8192;
+    core::KVCacheConfig kv_cfg = model->config().create_kv_cache_config(8192);
     core::KVCache kv_cache(ctx, kv_cfg);
     kv_cache.allocate();
 

@@ -10,23 +10,23 @@
 namespace xinfer::core {
 
 struct KVCacheConfig {
-    size_t max_seq_len{8192};
-    size_t num_full_layers{16};
-    size_t num_linear_layers{48};
-    size_t num_kv_heads{4};
-    size_t head_dim{256};
-    size_t linear_num_v_heads{48};
-    size_t linear_head_k_dim{128};
-    size_t linear_head_v_dim{128};
-    size_t linear_conv_channels{10240};
-    size_t linear_conv_kernel_dim{4}; // kernel_size=4, needs (kernel_size - 1) = 3 past timesteps
+    size_t max_seq_len{0};
+    size_t num_full_layers{0};
+    size_t num_linear_layers{0};
+    size_t num_kv_heads{0};
+    size_t head_dim{0};
+    size_t linear_num_v_heads{0};
+    size_t linear_head_k_dim{0};
+    size_t linear_head_v_dim{0};
+    size_t linear_conv_channels{0};
+    size_t linear_conv_kernel_dim{0};
 };
 
 // Physical container for KV cache (full attention) and recurrent/conv states (linear attention)
 // per AGENTS.md §4 (owned by src/core).
 class KVCache {
 public:
-    explicit KVCache(std::shared_ptr<DeviceContext> ctx, const KVCacheConfig& config = {});
+    explicit KVCache(std::shared_ptr<DeviceContext> ctx, const KVCacheConfig& config);
     ~KVCache();
 
     KVCache(const KVCache&) = delete;
@@ -43,19 +43,19 @@ public:
 
     // Full-attention layer accessors (FP16 / sycl::half)
     // Shape per layer: [max_seq_len, num_kv_heads, head_dim]
-    sycl::half* k_cache(size_t full_layer_idx) noexcept;
-    const sycl::half* k_cache(size_t full_layer_idx) const noexcept;
-    sycl::half* v_cache(size_t full_layer_idx) noexcept;
-    const sycl::half* v_cache(size_t full_layer_idx) const noexcept;
+    sycl::half* k_cache(size_t full_layer_idx);
+    const sycl::half* k_cache(size_t full_layer_idx) const;
+    sycl::half* v_cache(size_t full_layer_idx);
+    const sycl::half* v_cache(size_t full_layer_idx) const;
 
     // Linear-attention recurrent state accessors (FP32)
     // S state shape per layer: [linear_num_v_heads, linear_head_k_dim, linear_head_v_dim]
-    float* linear_state(size_t linear_layer_idx) noexcept;
-    const float* linear_state(size_t linear_layer_idx) const noexcept;
+    float* linear_state(size_t linear_layer_idx);
+    const float* linear_state(size_t linear_layer_idx) const;
 
     // Conv state shape per layer: [linear_conv_kernel_dim - 1, linear_conv_channels]
-    float* conv_state(size_t linear_layer_idx) noexcept;
-    const float* conv_state(size_t linear_layer_idx) const noexcept;
+    float* conv_state(size_t linear_layer_idx);
+    const float* conv_state(size_t linear_layer_idx) const;
 
     size_t current_seq_len() const noexcept { return current_seq_len_; }
     void set_seq_len(size_t len) noexcept { current_seq_len_ = std::min(len, config_.max_seq_len); }
