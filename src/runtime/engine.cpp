@@ -8,6 +8,8 @@
 #include "core/kv_cache.h"
 #include <chrono>
 #include <iostream>
+#include <new>
+#include <exception>
 
 namespace xinfer {
 
@@ -17,14 +19,15 @@ public:
     ~EngineImpl() = default;
 
     bool load(const EngineConfig& config, std::string* error_msg) {
-        config_ = config;
+        try {
+            config_ = config;
 
-        // 1. Initialize Device Context
-        ctx_ = core::DeviceContext::create(config.prefer_b60);
-        if (!ctx_) {
-            if (error_msg) *error_msg = "Failed to initialize Intel GPU DeviceContext";
-            return false;
-        }
+            // 1. Initialize Device Context
+            ctx_ = core::DeviceContext::create(config.prefer_b60);
+            if (!ctx_) {
+                if (error_msg) *error_msg = "Failed to initialize Intel GPU DeviceContext";
+                return false;
+            }
 
         const auto& arch = ctx_->arch_info();
         uint64_t vram_gb = (arch.global_mem_bytes + (1024ULL * 1024 * 1024 - 1)) / (1024ULL * 1024 * 1024);
@@ -87,8 +90,29 @@ public:
             std::cout << "[xinfer::Engine] Graph capture fallback to standard kernel submission" << std::endl;
         }
 
-        is_loaded_ = true;
-        return true;
+            is_loaded_ = true;
+            return true;
+        } catch (const sycl::exception& e) {
+            std::string msg = "SYCL exception during model load: " + std::string(e.what());
+            std::cerr << "[xinfer::Engine] " << msg << std::endl;
+            if (error_msg) *error_msg = msg;
+            return false;
+        } catch (const std::bad_alloc& e) {
+            std::string msg = "Memory allocation failed (std::bad_alloc / OOM) during model load";
+            std::cerr << "[xinfer::Engine] " << msg << std::endl;
+            if (error_msg) *error_msg = msg;
+            return false;
+        } catch (const std::exception& e) {
+            std::string msg = "Exception during model load: " + std::string(e.what());
+            std::cerr << "[xinfer::Engine] " << msg << std::endl;
+            if (error_msg) *error_msg = msg;
+            return false;
+        } catch (...) {
+            std::string msg = "Unknown exception during model load";
+            std::cerr << "[xinfer::Engine] " << msg << std::endl;
+            if (error_msg) *error_msg = msg;
+            return false;
+        }
     }
 
     bool is_loaded() const noexcept {
@@ -132,138 +156,168 @@ public:
                               const GenerationConfig& gen_config,
                               TokenCallback callback) {
         GenerationResult result;
-        if (!is_loaded()) {
-            std::cerr << "[xinfer::Engine] Error: Model is not loaded" << std::endl;
-            result.success = false;
-            result.error_code = "model_not_loaded";
-            result.error_msg = "Model is not loaded";
-            return result;
-        }
+        try {
+            if (!is_loaded()) {
+                std::cerr << "[xinfer::Engine] Error: Model is not loaded" << std::endl;
+                result.success = false;
+                result.error_code = "model_not_loaded";
+                result.error_msg = "Model is not loaded";
+                return result;
+            }
 
-        // Format prompt
-        std::string input_text = prompt;
-        if (gen_config.apply_chat_template) {
-            input_text = tokenizer_.apply_chat_template(prompt);
-        }
+            // Format prompt
+            std::string input_text = prompt;
+            if (gen_config.apply_chat_template) {
+                input_text = tokenizer_.apply_chat_template(prompt);
+            }
 
-        // Encode prompt tokens
-        std::vector<int64_t> token_seq = tokenizer_.encode(input_text);
-        if (token_seq.empty()) {
-            std::cerr << "[xinfer::Engine] Error: Tokenizer produced 0 tokens" << std::endl;
-            result.success = false;
-            result.error_code = "empty_prompt";
-            result.error_msg = "Tokenizer produced 0 tokens";
-            return result;
-        }
+            // Encode prompt tokens
+            std::vector<int64_t> token_seq = tokenizer_.encode(input_text);
+            if (token_seq.empty()) {
+                std::cerr << "[xinfer::Engine] Error: Tokenizer produced 0 tokens" << std::endl;
+                result.success = false;
+                result.error_code = "empty_prompt";
+                result.error_msg = "Tokenizer produced 0 tokens";
+                return result;
+            }
 
-        result.prompt_tokens = token_seq.size();
+            result.prompt_tokens = token_seq.size();
 
-        // Validate context length before any GPU-writing call
-        std::string val_err;
-        if (!validate_tokens(token_seq.size(), gen_config.max_new_tokens, &val_err)) {
-            std::cerr << "[xinfer::Engine] Error: " << val_err << std::endl;
-            result.success = false;
-            result.error_code = "context_length_exceeded";
-            result.error_msg = val_err;
-            return result;
-        }
+            // Validate context length before any GPU-writing call
+            std::string val_err;
+            if (!validate_tokens(token_seq.size(), gen_config.max_new_tokens, &val_err)) {
+                std::cerr << "[xinfer::Engine] Error: " << val_err << std::endl;
+                result.success = false;
+                result.error_code = "context_length_exceeded";
+                result.error_msg = val_err;
+                return result;
+            }
 
-        // 1. Prefill prompt (supports chunking via config_.prefill_chunk_size)
-        auto t0 = std::chrono::high_resolution_clock::now();
-        int64_t current_tok = targets::qwen3_8::prefill_prompt(
-            ctx_, *arena_, *model_, *kv_cache_, token_seq, config_.prefill_chunk_size);
-        if (current_tok < 0) {
-            result.success = false;
-            result.error_code = "prefill_failed";
-            result.error_msg = "Prefill failed: context length exceeded";
-            return result;
-        }
+            // 1. Prefill prompt (supports chunking via config_.prefill_chunk_size)
+            auto t0 = std::chrono::high_resolution_clock::now();
+            int64_t current_tok = targets::qwen3_8::prefill_prompt(
+                ctx_, *arena_, *model_, *kv_cache_, token_seq, config_.prefill_chunk_size);
+            if (current_tok < 0) {
+                result.success = false;
+                result.error_code = "prefill_failed";
+                result.error_msg = "Prefill failed: context length exceeded";
+                return result;
+            }
 
-        auto t_first = std::chrono::high_resolution_clock::now();
-        result.time_to_first_token_sec = std::chrono::duration<double>(t_first - t0).count();
+            auto t_first = std::chrono::high_resolution_clock::now();
+            result.time_to_first_token_sec = std::chrono::duration<double>(t_first - t0).count();
 
-        // Check for stop tokens on first token
-        if (current_tok == gen_config.eos_token_id || current_tok == gen_config.im_end_token_id) {
-            result.generated_tokens = 0;
-            result.finish_reason = "stop";
-            result.total_time_sec = result.time_to_first_token_sec;
-            return result;
-        }
-
-        result.token_ids.push_back(current_tok);
-        std::string first_piece = tokenizer_.decode_token(current_tok);
-        result.text += first_piece;
-
-        if (callback) {
-            if (!callback(first_piece, current_tok)) {
-                result.generated_tokens = 1;
+            // Check for stop tokens on first token
+            if (current_tok == gen_config.eos_token_id || current_tok == gen_config.im_end_token_id) {
+                result.generated_tokens = 0;
                 result.finish_reason = "stop";
                 result.total_time_sec = result.time_to_first_token_sec;
                 return result;
             }
-        }
 
-        // 2. Autoregressive single-token decode loop using persistent KV cache and captured command graph
-        result.finish_reason = "length"; // Default if max_new_tokens limit is reached
-        for (int step = 1; step < gen_config.max_new_tokens; ++step) {
-            // Guard against writing past the KV cache buffer capacity
-            if (kv_cache_->current_seq_len() >= kv_cache_->max_seq_len()) {
-                std::cout << "[xinfer::Engine] Context length limit reached ("
-                          << kv_cache_->current_seq_len() << "/" << kv_cache_->max_seq_len() << ")" << std::endl;
-                result.finish_reason = "length";
-                break;
-            }
-
-            int64_t next_tok = 0;
-            if (decode_graph_ && decode_graph_->is_captured()) {
-                next_tok = decode_graph_->decode_step(current_tok, kv_cache_->current_seq_len());
-                if (next_tok < 0) {
-                    result.finish_reason = "length";
-                    break;
-                }
-                if (!kv_cache_->advance(1)) {
-                    result.finish_reason = "length";
-                    break;
-                }
-            } else {
-                next_tok = targets::qwen3_8::decode_step(
-                    ctx_, *arena_, *model_, *kv_cache_, current_tok);
-                if (next_tok < 0) {
-                    result.finish_reason = "length";
-                    break;
-                }
-            }
-
-            if (next_tok == gen_config.eos_token_id || next_tok == gen_config.im_end_token_id) {
-                result.finish_reason = "stop";
-                break;
-            }
-
-            result.token_ids.push_back(next_tok);
-            std::string piece = tokenizer_.decode_token(next_tok);
-            result.text += piece;
+            result.token_ids.push_back(current_tok);
+            std::string first_piece = tokenizer_.decode_token(current_tok);
+            result.text += first_piece;
 
             if (callback) {
-                if (!callback(piece, next_tok)) {
+                if (!callback(first_piece, current_tok)) {
+                    result.generated_tokens = 1;
+                    result.finish_reason = "stop";
+                    result.total_time_sec = result.time_to_first_token_sec;
+                    return result;
+                }
+            }
+
+            // 2. Autoregressive single-token decode loop using persistent KV cache and captured command graph
+            result.finish_reason = "length"; // Default if max_new_tokens limit is reached
+            for (int step = 1; step < gen_config.max_new_tokens; ++step) {
+                // Guard against writing past the KV cache buffer capacity
+                if (kv_cache_->current_seq_len() >= kv_cache_->max_seq_len()) {
+                    std::cout << "[xinfer::Engine] Context length limit reached ("
+                              << kv_cache_->current_seq_len() << "/" << kv_cache_->max_seq_len() << ")" << std::endl;
+                    result.finish_reason = "length";
+                    break;
+                }
+
+                int64_t next_tok = 0;
+                if (decode_graph_ && decode_graph_->is_captured()) {
+                    next_tok = decode_graph_->decode_step(current_tok, kv_cache_->current_seq_len());
+                    if (next_tok < 0) {
+                        result.finish_reason = "length";
+                        break;
+                    }
+                    if (!kv_cache_->advance(1)) {
+                        result.finish_reason = "length";
+                        break;
+                    }
+                } else {
+                    next_tok = targets::qwen3_8::decode_step(
+                        ctx_, *arena_, *model_, *kv_cache_, current_tok);
+                    if (next_tok < 0) {
+                        result.finish_reason = "length";
+                        break;
+                    }
+                }
+
+                if (next_tok == gen_config.eos_token_id || next_tok == gen_config.im_end_token_id) {
                     result.finish_reason = "stop";
                     break;
                 }
+
+                result.token_ids.push_back(next_tok);
+                std::string piece = tokenizer_.decode_token(next_tok);
+                result.text += piece;
+
+                if (callback) {
+                    if (!callback(piece, next_tok)) {
+                        result.finish_reason = "stop";
+                        break;
+                    }
+                }
+
+                current_tok = next_tok;
             }
 
-            current_tok = next_tok;
+            auto t_end = std::chrono::high_resolution_clock::now();
+
+            result.generated_tokens = result.token_ids.size();
+            result.total_time_sec = std::chrono::duration<double>(t_end - t0).count();
+
+            double decode_time = std::chrono::duration<double>(t_end - t_first).count();
+            if (decode_time > 0.0 && result.generated_tokens > 1) {
+                result.decode_tokens_per_sec = static_cast<double>(result.generated_tokens - 1) / decode_time;
+            }
+
+            return result;
+        } catch (const sycl::exception& e) {
+            std::cerr << "[xinfer::Engine] SYCL exception during generation: " << e.what() << std::endl;
+            reset();
+            result.success = false;
+            result.error_code = "sycl_exception";
+            result.error_msg = std::string("SYCL exception during generation: ") + e.what();
+            return result;
+        } catch (const std::bad_alloc& e) {
+            std::cerr << "[xinfer::Engine] Memory allocation failed (std::bad_alloc / arena overflow) during generation" << std::endl;
+            reset();
+            result.success = false;
+            result.error_code = "bad_alloc";
+            result.error_msg = "Memory allocation failed (out of memory or arena overflow) during generation";
+            return result;
+        } catch (const std::exception& e) {
+            std::cerr << "[xinfer::Engine] Exception during generation: " << e.what() << std::endl;
+            reset();
+            result.success = false;
+            result.error_code = "internal_error";
+            result.error_msg = std::string("Exception during generation: ") + e.what();
+            return result;
+        } catch (...) {
+            std::cerr << "[xinfer::Engine] Unknown exception during generation" << std::endl;
+            reset();
+            result.success = false;
+            result.error_code = "internal_error";
+            result.error_msg = "Unknown exception during generation";
+            return result;
         }
-
-        auto t_end = std::chrono::high_resolution_clock::now();
-
-        result.generated_tokens = result.token_ids.size();
-        result.total_time_sec = std::chrono::duration<double>(t_end - t0).count();
-
-        double decode_time = std::chrono::duration<double>(t_end - t_first).count();
-        if (decode_time > 0.0 && result.generated_tokens > 1) {
-            result.decode_tokens_per_sec = static_cast<double>(result.generated_tokens - 1) / decode_time;
-        }
-
-        return result;
     }
 
     void reset() {

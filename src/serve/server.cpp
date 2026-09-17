@@ -1,10 +1,13 @@
 #include "server.h"
+#include <sycl/sycl.hpp>
 #include <iostream>
 #include <sstream>
 #include <vector>
 #include <chrono>
 #include <algorithm>
 #include <mutex>
+#include <new>
+#include <exception>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -363,104 +366,172 @@ void HttpServer::handle_client(uintptr_t client_socket) {
         std::chrono::system_clock::now().time_since_epoch()).count();
 
     // 4. Execute inference serialized via public Engine interface
-    std::lock_guard<std::mutex> lock(g_engine_mutex);
+    try {
+        std::lock_guard<std::mutex> lock(g_engine_mutex);
 
-    if (!req.stream) {
-        // --- Non-Streaming Response ---
-        auto result = engine_.generate(prompt, gen_cfg);
-        if (!result.success) {
-            ApiError err;
-            err.status_code = 400;
-            err.type = "invalid_request_error";
-            err.code = result.error_code.empty() ? "bad_request" : result.error_code;
-            err.message = result.error_msg;
-            std::string err_body = err.to_json();
+        if (!req.stream) {
+            // --- Non-Streaming Response ---
+            auto result = engine_.generate(prompt, gen_cfg);
+            if (!result.success) {
+                int status = (result.error_code == "bad_alloc" || result.error_code == "sycl_exception" || result.error_code == "internal_error") ? 500 : 400;
+                ApiError err;
+                err.status_code = status;
+                err.type = (status == 500) ? "server_error" : "invalid_request_error";
+                err.code = result.error_code.empty() ? "bad_request" : result.error_code;
+                err.message = result.error_msg;
+                std::string err_body = err.to_json();
+                std::string status_text = (status == 500) ? "Internal Server Error" : "Bad Request";
+                std::string http_resp =
+                    "HTTP/1.1 " + std::to_string(status) + " " + status_text + "\r\n"
+                    "Content-Type: application/json\r\n"
+                    "Access-Control-Allow-Origin: *\r\n"
+                    "Content-Length: " + std::to_string(err_body.size()) + "\r\n"
+                    "Connection: close\r\n\r\n" + err_body;
+                send_string(sock, http_resp);
+                CLOSE_SOCKET(sock);
+                return;
+            }
+
+            ChatCompletionResponse resp;
+            resp.id = req_id;
+            resp.created = created_ts;
+            resp.model = config_.model_id;
+
+            ChatChoice choice;
+            choice.index = 0;
+            choice.message.role = "assistant";
+            choice.message.content = result.text;
+            choice.finish_reason = result.finish_reason;
+            resp.choices.push_back(std::move(choice));
+
+            resp.usage.prompt_tokens = result.prompt_tokens;
+            resp.usage.completion_tokens = result.generated_tokens;
+            resp.usage.total_tokens = result.prompt_tokens + result.generated_tokens;
+
+            std::string resp_json = resp.to_json();
             std::string http_resp =
-                "HTTP/1.1 400 Bad Request\r\n"
+                "HTTP/1.1 200 OK\r\n"
                 "Content-Type: application/json\r\n"
                 "Access-Control-Allow-Origin: *\r\n"
-                "Content-Length: " + std::to_string(err_body.size()) + "\r\n"
-                "Connection: close\r\n\r\n" + err_body;
+                "Content-Length: " + std::to_string(resp_json.size()) + "\r\n"
+                "Connection: close\r\n\r\n" + resp_json;
             send_string(sock, http_resp);
-            CLOSE_SOCKET(sock);
-            return;
+
+        } else {
+            // --- Streaming SSE Response ---
+            std::string sse_headers =
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/event-stream\r\n"
+                "Cache-Control: no-cache\r\n"
+                "Connection: close\r\n"
+                "Access-Control-Allow-Origin: *\r\n\r\n";
+            send_string(sock, sse_headers);
+
+            // Initial chunk announcing role
+            ChatCompletionChunk init_chunk;
+            init_chunk.id = req_id;
+            init_chunk.created = created_ts;
+            init_chunk.model = config_.model_id;
+            ChunkChoice init_choice;
+            init_choice.index = 0;
+            init_choice.delta.role = "assistant";
+            init_choice.delta.content = "";
+            init_chunk.choices.push_back(std::move(init_choice));
+            send_string(sock, init_chunk.to_sse_event());
+
+            // Token callback streaming delta pieces
+            auto token_callback = [&](const std::string& piece, int64_t /*tok_id*/) -> bool {
+                ChatCompletionChunk chunk;
+                chunk.id = req_id;
+                chunk.created = created_ts;
+                chunk.model = config_.model_id;
+                ChunkChoice ch;
+                ch.index = 0;
+                ch.delta.content = piece;
+                chunk.choices.push_back(std::move(ch));
+                return send_string(sock, chunk.to_sse_event());
+            };
+
+            auto result = engine_.generate(prompt, gen_cfg, token_callback);
+
+            // Final finish_reason chunk
+            ChatCompletionChunk finish_chunk;
+            finish_chunk.id = req_id;
+            finish_chunk.created = created_ts;
+            finish_chunk.model = config_.model_id;
+            ChunkChoice fin_choice;
+            fin_choice.index = 0;
+            fin_choice.finish_reason = result.finish_reason;
+            finish_chunk.choices.push_back(std::move(fin_choice));
+            send_string(sock, finish_chunk.to_sse_event());
+
+            // End of stream indicator
+            send_string(sock, "data: [DONE]\n\n");
         }
-
-        ChatCompletionResponse resp;
-        resp.id = req_id;
-        resp.created = created_ts;
-        resp.model = config_.model_id;
-
-        ChatChoice choice;
-        choice.index = 0;
-        choice.message.role = "assistant";
-        choice.message.content = result.text;
-        choice.finish_reason = result.finish_reason;
-        resp.choices.push_back(std::move(choice));
-
-        resp.usage.prompt_tokens = result.prompt_tokens;
-        resp.usage.completion_tokens = result.generated_tokens;
-        resp.usage.total_tokens = result.prompt_tokens + result.generated_tokens;
-
-        std::string resp_json = resp.to_json();
-        std::string http_resp =
-            "HTTP/1.1 200 OK\r\n"
+    } catch (const sycl::exception& e) {
+        std::cerr << "[xinfer-serve] SYCL exception during inference: " << e.what() << std::endl;
+        try { engine_.reset(); } catch (...) {}
+        ApiError err;
+        err.status_code = 500;
+        err.type = "server_error";
+        err.code = "sycl_error";
+        err.message = std::string("SYCL device exception: ") + e.what();
+        std::string err_body = err.to_json();
+        std::string resp =
+            "HTTP/1.1 500 Internal Server Error\r\n"
             "Content-Type: application/json\r\n"
             "Access-Control-Allow-Origin: *\r\n"
-            "Content-Length: " + std::to_string(resp_json.size()) + "\r\n"
-            "Connection: close\r\n\r\n" + resp_json;
-        send_string(sock, http_resp);
-
-    } else {
-        // --- Streaming SSE Response ---
-        std::string sse_headers =
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/event-stream\r\n"
-            "Cache-Control: no-cache\r\n"
-            "Connection: close\r\n"
-            "Access-Control-Allow-Origin: *\r\n\r\n";
-        send_string(sock, sse_headers);
-
-        // Initial chunk announcing role
-        ChatCompletionChunk init_chunk;
-        init_chunk.id = req_id;
-        init_chunk.created = created_ts;
-        init_chunk.model = config_.model_id;
-        ChunkChoice init_choice;
-        init_choice.index = 0;
-        init_choice.delta.role = "assistant";
-        init_choice.delta.content = "";
-        init_chunk.choices.push_back(std::move(init_choice));
-        send_string(sock, init_chunk.to_sse_event());
-
-        // Token callback streaming delta pieces
-        auto token_callback = [&](const std::string& piece, int64_t /*tok_id*/) -> bool {
-            ChatCompletionChunk chunk;
-            chunk.id = req_id;
-            chunk.created = created_ts;
-            chunk.model = config_.model_id;
-            ChunkChoice ch;
-            ch.index = 0;
-            ch.delta.content = piece;
-            chunk.choices.push_back(std::move(ch));
-            return send_string(sock, chunk.to_sse_event());
-        };
-
-        auto result = engine_.generate(prompt, gen_cfg, token_callback);
-
-        // Final finish_reason chunk
-        ChatCompletionChunk finish_chunk;
-        finish_chunk.id = req_id;
-        finish_chunk.created = created_ts;
-        finish_chunk.model = config_.model_id;
-        ChunkChoice fin_choice;
-        fin_choice.index = 0;
-        fin_choice.finish_reason = result.finish_reason;
-        finish_chunk.choices.push_back(std::move(fin_choice));
-        send_string(sock, finish_chunk.to_sse_event());
-
-        // End of stream indicator
-        send_string(sock, "data: [DONE]\n\n");
+            "Content-Length: " + std::to_string(err_body.size()) + "\r\n"
+            "Connection: close\r\n\r\n" + err_body;
+        send_string(sock, resp);
+    } catch (const std::bad_alloc& e) {
+        std::cerr << "[xinfer-serve] Memory allocation failure (std::bad_alloc) during inference: " << e.what() << std::endl;
+        try { engine_.reset(); } catch (...) {}
+        ApiError err;
+        err.status_code = 500;
+        err.type = "server_error";
+        err.code = "out_of_memory";
+        err.message = "GPU memory allocation failed (out of memory or scratchpad arena overflow)";
+        std::string err_body = err.to_json();
+        std::string resp =
+            "HTTP/1.1 500 Internal Server Error\r\n"
+            "Content-Type: application/json\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Content-Length: " + std::to_string(err_body.size()) + "\r\n"
+            "Connection: close\r\n\r\n" + err_body;
+        send_string(sock, resp);
+    } catch (const std::exception& e) {
+        std::cerr << "[xinfer-serve] Standard exception during inference: " << e.what() << std::endl;
+        try { engine_.reset(); } catch (...) {}
+        ApiError err;
+        err.status_code = 500;
+        err.type = "server_error";
+        err.code = "internal_server_error";
+        err.message = std::string("Internal server error: ") + e.what();
+        std::string err_body = err.to_json();
+        std::string resp =
+            "HTTP/1.1 500 Internal Server Error\r\n"
+            "Content-Type: application/json\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Content-Length: " + std::to_string(err_body.size()) + "\r\n"
+            "Connection: close\r\n\r\n" + err_body;
+        send_string(sock, resp);
+    } catch (...) {
+        std::cerr << "[xinfer-serve] Unknown exception during inference" << std::endl;
+        try { engine_.reset(); } catch (...) {}
+        ApiError err;
+        err.status_code = 500;
+        err.type = "server_error";
+        err.code = "internal_server_error";
+        err.message = "Unknown internal server error during inference execution";
+        std::string err_body = err.to_json();
+        std::string resp =
+            "HTTP/1.1 500 Internal Server Error\r\n"
+            "Content-Type: application/json\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Content-Length: " + std::to_string(err_body.size()) + "\r\n"
+            "Connection: close\r\n\r\n" + err_body;
+        send_string(sock, resp);
     }
 
     CLOSE_SOCKET(sock);

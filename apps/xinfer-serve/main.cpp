@@ -1,10 +1,12 @@
 #include "xinfer/engine.h"
 #include "serve/server.h"
-
+#include <sycl/sycl.hpp>
 #include <iostream>
 #include <string>
 #include <csignal>
 #include <atomic>
+#include <new>
+#include <exception>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -83,8 +85,22 @@ int main(int argc, char** argv) {
 
     xinfer::Engine engine;
     std::string err;
-    if (!engine.load(eng_cfg, &err)) {
-        std::cerr << "[xinfer-serve] Fatal error loading model: " << err << std::endl;
+    try {
+        if (!engine.load(eng_cfg, &err)) {
+            std::cerr << "[xinfer-serve] Fatal error loading model: " << err << std::endl;
+            return 1;
+        }
+    } catch (const sycl::exception& e) {
+        std::cerr << "[xinfer-serve] Fatal SYCL exception loading model: " << e.what() << std::endl;
+        return 1;
+    } catch (const std::bad_alloc& e) {
+        std::cerr << "[xinfer-serve] Fatal out-of-memory (std::bad_alloc) loading model: " << e.what() << std::endl;
+        return 1;
+    } catch (const std::exception& e) {
+        std::cerr << "[xinfer-serve] Fatal exception loading model: " << e.what() << std::endl;
+        return 1;
+    } catch (...) {
+        std::cerr << "[xinfer-serve] Fatal unknown exception loading model" << std::endl;
         return 1;
     }
 
@@ -94,8 +110,16 @@ int main(int argc, char** argv) {
     srv_cfg.model_id = model_id;
 
     xinfer::serve::HttpServer server(engine);
-    if (!server.start(srv_cfg, &err)) {
-        std::cerr << "[xinfer-serve] Fatal error starting HTTP server: " << err << std::endl;
+    try {
+        if (!server.start(srv_cfg, &err)) {
+            std::cerr << "[xinfer-serve] Fatal error starting HTTP server: " << err << std::endl;
+            return 1;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[xinfer-serve] Fatal exception starting HTTP server: " << e.what() << std::endl;
+        return 1;
+    } catch (...) {
+        std::cerr << "[xinfer-serve] Fatal unknown exception starting HTTP server" << std::endl;
         return 1;
     }
 

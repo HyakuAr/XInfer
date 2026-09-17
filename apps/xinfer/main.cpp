@@ -1,7 +1,10 @@
 #include "xinfer/engine.h"
+#include <sycl/sycl.hpp>
 #include <iostream>
 #include <string>
 #include <vector>
+#include <new>
+#include <exception>
 
 void print_usage(const char* prog) {
     std::cout << "Usage: " << prog << " [options]\n\n"
@@ -70,9 +73,23 @@ int main(int argc, char** argv) {
     config.max_seq_len = static_cast<size_t>(max_seq_len);
     config.prefill_chunk_size = static_cast<size_t>(chunk_size);
 
-    std::string error_msg;
-    if (!engine.load(config, &error_msg)) {
-        std::cerr << "[Error] Failed to load model: " << error_msg << std::endl;
+    try {
+        std::string error_msg;
+        if (!engine.load(config, &error_msg)) {
+            std::cerr << "[Error] Failed to load model: " << error_msg << std::endl;
+            return 1;
+        }
+    } catch (const sycl::exception& e) {
+        std::cerr << "[Error] SYCL exception during model load: " << e.what() << std::endl;
+        return 1;
+    } catch (const std::bad_alloc& e) {
+        std::cerr << "[Error] Memory allocation failed (std::bad_alloc / OOM) during model load" << std::endl;
+        return 1;
+    } catch (const std::exception& e) {
+        std::cerr << "[Error] Exception during model load: " << e.what() << std::endl;
+        return 1;
+    } catch (...) {
+        std::cerr << "[Error] Unknown exception during model load" << std::endl;
         return 1;
     }
 
@@ -87,7 +104,27 @@ int main(int argc, char** argv) {
         return true;
     };
 
-    auto result = engine.generate(prompt, gen_config, stream_cb);
+    xinfer::GenerationResult result;
+    try {
+        result = engine.generate(prompt, gen_config, stream_cb);
+    } catch (const sycl::exception& e) {
+        std::cerr << "\n[Error] SYCL exception during generation: " << e.what() << std::endl;
+        return 1;
+    } catch (const std::bad_alloc& e) {
+        std::cerr << "\n[Error] Memory allocation failed (std::bad_alloc / arena overflow) during generation" << std::endl;
+        return 1;
+    } catch (const std::exception& e) {
+        std::cerr << "\n[Error] Exception during generation: " << e.what() << std::endl;
+        return 1;
+    } catch (...) {
+        std::cerr << "\n[Error] Unknown exception during generation" << std::endl;
+        return 1;
+    }
+
+    if (!result.success) {
+        std::cerr << "\n[Error] Generation failed: " << result.error_msg << std::endl;
+        return 1;
+    }
 
     std::cout << "\n--------------------------------------------------------\n"
               << "\n[Performance Statistics]\n"

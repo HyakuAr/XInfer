@@ -74,8 +74,12 @@ std::unique_ptr<LoadedModel> LoadedModel::load_from_artifact(
             return view;
         }
         if (host_w.size() != expected_w_bytes) {
-            std::cerr << "[Warning] Weight size mismatch for " << weight_name
-                      << ": expected " << expected_w_bytes << ", got " << host_w.size() << std::endl;
+            std::string msg = "Weight size mismatch for " + weight_name +
+                              ": expected " + std::to_string(expected_w_bytes) +
+                              ", got " + std::to_string(host_w.size());
+            std::cerr << "[Error] " << msg << std::endl;
+            if (error_msg) *error_msg = msg;
+            return view;
         }
 
         view.d_weights_int4 = alloc_dev(host_w.size());
@@ -86,11 +90,17 @@ std::unique_ptr<LoadedModel> LoadedModel::load_from_artifact(
         std::vector<uint8_t> host_s;
         if (!reader.read_section(scale_name, host_s, error_msg)) {
             std::cerr << "[Error] Failed to read section: " << scale_name << std::endl;
+            view.d_weights_int4 = nullptr;
             return view;
         }
         if (host_s.size() != expected_s_bytes) {
-            std::cerr << "[Warning] Scales size mismatch for " << scale_name
-                      << ": expected " << expected_s_bytes << ", got " << host_s.size() << std::endl;
+            std::string msg = "Scales size mismatch for " + scale_name +
+                              ": expected " + std::to_string(expected_s_bytes) +
+                              ", got " + std::to_string(host_s.size());
+            std::cerr << "[Error] " << msg << std::endl;
+            if (error_msg) *error_msg = msg;
+            view.d_weights_int4 = nullptr;
+            return view;
         }
 
         view.d_scales = alloc_dev(host_s.size());
@@ -108,12 +118,19 @@ std::unique_ptr<LoadedModel> LoadedModel::load_from_artifact(
             return nullptr;
         }
 
-        size_t count = host_raw.size() / sizeof(uint16_t);
-        if (count != num_elements) {
-            std::cerr << "[Warning] Element count mismatch for " << section_name
-                      << ": expected " << num_elements << ", got " << count << std::endl;
+        size_t expected_bytes = num_elements * sizeof(uint16_t);
+        if (host_raw.size() != expected_bytes) {
+            std::string msg = "Element count/size mismatch for " + section_name +
+                              ": expected " + std::to_string(expected_bytes) + " bytes (" +
+                              std::to_string(num_elements) + " elements), got " +
+                              std::to_string(host_raw.size()) + " bytes (" +
+                              std::to_string(host_raw.size() / sizeof(uint16_t)) + " elements)";
+            std::cerr << "[Error] " << msg << std::endl;
+            if (error_msg) *error_msg = msg;
+            return nullptr;
         }
 
+        size_t count = num_elements;
         const uint16_t* bf16_ptr = reinterpret_cast<const uint16_t*>(host_raw.data());
         std::vector<float> host_fp32(count);
         for (size_t i = 0; i < count; ++i) {
@@ -136,7 +153,16 @@ std::unique_ptr<LoadedModel> LoadedModel::load_from_artifact(
     std::string embed_name = "model.language_model.embed_tokens.weight";
     std::vector<uint8_t> host_embed;
     if (!reader.read_section(embed_name, host_embed, error_msg)) {
-        if (error_msg) *error_msg = "Failed to load embed_tokens section";
+        if (error_msg && error_msg->empty()) *error_msg = "Failed to load embed_tokens section";
+        return nullptr;
+    }
+    size_t expected_embed_bytes = static_cast<size_t>(model->config_.vocab_size) * model->config_.hidden_size * sizeof(uint16_t);
+    if (host_embed.size() != expected_embed_bytes) {
+        std::string msg = "Embed tokens size mismatch for " + embed_name +
+                          ": expected " + std::to_string(expected_embed_bytes) +
+                          ", got " + std::to_string(host_embed.size());
+        std::cerr << "[Error] " << msg << std::endl;
+        if (error_msg) *error_msg = msg;
         return nullptr;
     }
     model->d_embed_tokens_ = alloc_dev(host_embed.size());
@@ -147,7 +173,7 @@ std::unique_ptr<LoadedModel> LoadedModel::load_from_artifact(
     std::string final_norm_name = "model.language_model.norm.weight";
     model->d_final_norm_ = load_bf16_as_fp32(final_norm_name, model->config_.hidden_size, true);
     if (!model->d_final_norm_) {
-        if (error_msg) *error_msg = "Failed to load final norm";
+        if (error_msg && error_msg->empty()) *error_msg = "Failed to load final norm";
         return nullptr;
     }
 
@@ -155,7 +181,7 @@ std::unique_ptr<LoadedModel> LoadedModel::load_from_artifact(
     std::string lm_head_name = "lm_head.weight";
     model->lm_head_ = load_linear(lm_head_name, model->config_.vocab_size, model->config_.hidden_size, 128);
     if (!model->lm_head_.is_valid()) {
-        if (error_msg) *error_msg = "Failed to load lm_head";
+        if (error_msg && error_msg->empty()) *error_msg = "Failed to load lm_head";
         return nullptr;
     }
     std::cout << "[xinfer] Loaded lm_head (INT4)" << std::endl;
@@ -170,52 +196,169 @@ std::unique_ptr<LoadedModel> LoadedModel::load_from_artifact(
 
         // Layer norms (Qwen3_5RMSNorm: 1.0 + weight)
         layer.d_input_layernorm = load_bf16_as_fp32(prefix + ".input_layernorm.weight", model->config_.hidden_size, true);
+        if (!layer.d_input_layernorm) {
+            std::string msg = "Failed to load input_layernorm for layer " + std::to_string(l);
+            std::cerr << "[Error] " << msg << std::endl;
+            if (error_msg && error_msg->empty()) *error_msg = msg;
+            return nullptr;
+        }
+
         layer.d_post_attention_layernorm = load_bf16_as_fp32(prefix + ".post_attention_layernorm.weight", model->config_.hidden_size, true);
+        if (!layer.d_post_attention_layernorm) {
+            std::string msg = "Failed to load post_attention_layernorm for layer " + std::to_string(l);
+            std::cerr << "[Error] " << msg << std::endl;
+            if (error_msg && error_msg->empty()) *error_msg = msg;
+            return nullptr;
+        }
 
         // MLP
         layer.gate_proj = load_linear(prefix + ".mlp.gate_proj.weight", model->config_.intermediate_size, model->config_.hidden_size, 128);
-        layer.up_proj   = load_linear(prefix + ".mlp.up_proj.weight", model->config_.intermediate_size, model->config_.hidden_size, 128);
+        if (!layer.gate_proj.is_valid()) {
+            std::string msg = "Failed to load mlp.gate_proj for layer " + std::to_string(l);
+            std::cerr << "[Error] " << msg << std::endl;
+            if (error_msg && error_msg->empty()) *error_msg = msg;
+            return nullptr;
+        }
+
+        layer.up_proj = load_linear(prefix + ".mlp.up_proj.weight", model->config_.intermediate_size, model->config_.hidden_size, 128);
+        if (!layer.up_proj.is_valid()) {
+            std::string msg = "Failed to load mlp.up_proj for layer " + std::to_string(l);
+            std::cerr << "[Error] " << msg << std::endl;
+            if (error_msg && error_msg->empty()) *error_msg = msg;
+            return nullptr;
+        }
+
         layer.down_proj = load_linear(prefix + ".mlp.down_proj.weight", model->config_.hidden_size, model->config_.intermediate_size, 128);
+        if (!layer.down_proj.is_valid()) {
+            std::string msg = "Failed to load mlp.down_proj for layer " + std::to_string(l);
+            std::cerr << "[Error] " << msg << std::endl;
+            if (error_msg && error_msg->empty()) *error_msg = msg;
+            return nullptr;
+        }
 
         // Token Mixer: alternating 3 linear attention and 1 full attention
         if (l % 4 == 3) {
             layer.layer_type = "full_attention";
-            // Full attention:
-            // q_proj: [12288, 5120]
-            // k_proj: [1024, 5120]
-            // v_proj: [1024, 5120]
-            // o_proj: [5120, 6144]
-            // q_norm: [256]
-            // k_norm: [256]
             layer.q_proj = load_linear(prefix + ".self_attn.q_proj.weight", 12288, model->config_.hidden_size, 128);
+            if (!layer.q_proj.is_valid()) {
+                std::string msg = "Failed to load self_attn.q_proj for layer " + std::to_string(l);
+                std::cerr << "[Error] " << msg << std::endl;
+                if (error_msg && error_msg->empty()) *error_msg = msg;
+                return nullptr;
+            }
+
             layer.k_proj = load_linear(prefix + ".self_attn.k_proj.weight", 1024, model->config_.hidden_size, 128);
+            if (!layer.k_proj.is_valid()) {
+                std::string msg = "Failed to load self_attn.k_proj for layer " + std::to_string(l);
+                std::cerr << "[Error] " << msg << std::endl;
+                if (error_msg && error_msg->empty()) *error_msg = msg;
+                return nullptr;
+            }
+
             layer.v_proj = load_linear(prefix + ".self_attn.v_proj.weight", 1024, model->config_.hidden_size, 128);
+            if (!layer.v_proj.is_valid()) {
+                std::string msg = "Failed to load self_attn.v_proj for layer " + std::to_string(l);
+                std::cerr << "[Error] " << msg << std::endl;
+                if (error_msg && error_msg->empty()) *error_msg = msg;
+                return nullptr;
+            }
+
             layer.o_proj = load_linear(prefix + ".self_attn.o_proj.weight", model->config_.hidden_size, 6144, 128);
+            if (!layer.o_proj.is_valid()) {
+                std::string msg = "Failed to load self_attn.o_proj for layer " + std::to_string(l);
+                std::cerr << "[Error] " << msg << std::endl;
+                if (error_msg && error_msg->empty()) *error_msg = msg;
+                return nullptr;
+            }
 
             layer.d_q_norm = load_bf16_as_fp32(prefix + ".self_attn.q_norm.weight", 256, true);
+            if (!layer.d_q_norm) {
+                std::string msg = "Failed to load self_attn.q_norm for layer " + std::to_string(l);
+                std::cerr << "[Error] " << msg << std::endl;
+                if (error_msg && error_msg->empty()) *error_msg = msg;
+                return nullptr;
+            }
+
             layer.d_k_norm = load_bf16_as_fp32(prefix + ".self_attn.k_norm.weight", 256, true);
+            if (!layer.d_k_norm) {
+                std::string msg = "Failed to load self_attn.k_norm for layer " + std::to_string(l);
+                std::cerr << "[Error] " << msg << std::endl;
+                if (error_msg && error_msg->empty()) *error_msg = msg;
+                return nullptr;
+            }
         } else {
             layer.layer_type = "linear_attention";
-            // Linear attention:
-            // in_proj_qkv: [10240, 5120]
-            // in_proj_z:   [6144, 5120]
-            // in_proj_b:   [48, 5120]
-            // in_proj_a:   [48, 5120]
-            // out_proj:    [5120, 6144]
-            // conv1d:      [10240, 1, 4] = 40960
-            // A_log:       [48]
-            // dt_bias:     [48]
-            // norm:        [128]
             layer.in_proj_qkv = load_linear(prefix + ".linear_attn.in_proj_qkv.weight", 10240, model->config_.hidden_size, 128);
-            layer.in_proj_z   = load_linear(prefix + ".linear_attn.in_proj_z.weight", 6144, model->config_.hidden_size, 128);
-            layer.in_proj_b   = load_linear(prefix + ".linear_attn.in_proj_b.weight", 48, model->config_.hidden_size, 128);
-            layer.in_proj_a   = load_linear(prefix + ".linear_attn.in_proj_a.weight", 48, model->config_.hidden_size, 128);
-            layer.out_proj    = load_linear(prefix + ".linear_attn.out_proj.weight", model->config_.hidden_size, 6144, 128);
+            if (!layer.in_proj_qkv.is_valid()) {
+                std::string msg = "Failed to load linear_attn.in_proj_qkv for layer " + std::to_string(l);
+                std::cerr << "[Error] " << msg << std::endl;
+                if (error_msg && error_msg->empty()) *error_msg = msg;
+                return nullptr;
+            }
+
+            layer.in_proj_z = load_linear(prefix + ".linear_attn.in_proj_z.weight", 6144, model->config_.hidden_size, 128);
+            if (!layer.in_proj_z.is_valid()) {
+                std::string msg = "Failed to load linear_attn.in_proj_z for layer " + std::to_string(l);
+                std::cerr << "[Error] " << msg << std::endl;
+                if (error_msg && error_msg->empty()) *error_msg = msg;
+                return nullptr;
+            }
+
+            layer.in_proj_b = load_linear(prefix + ".linear_attn.in_proj_b.weight", 48, model->config_.hidden_size, 128);
+            if (!layer.in_proj_b.is_valid()) {
+                std::string msg = "Failed to load linear_attn.in_proj_b for layer " + std::to_string(l);
+                std::cerr << "[Error] " << msg << std::endl;
+                if (error_msg && error_msg->empty()) *error_msg = msg;
+                return nullptr;
+            }
+
+            layer.in_proj_a = load_linear(prefix + ".linear_attn.in_proj_a.weight", 48, model->config_.hidden_size, 128);
+            if (!layer.in_proj_a.is_valid()) {
+                std::string msg = "Failed to load linear_attn.in_proj_a for layer " + std::to_string(l);
+                std::cerr << "[Error] " << msg << std::endl;
+                if (error_msg && error_msg->empty()) *error_msg = msg;
+                return nullptr;
+            }
+
+            layer.out_proj = load_linear(prefix + ".linear_attn.out_proj.weight", model->config_.hidden_size, 6144, 128);
+            if (!layer.out_proj.is_valid()) {
+                std::string msg = "Failed to load linear_attn.out_proj for layer " + std::to_string(l);
+                std::cerr << "[Error] " << msg << std::endl;
+                if (error_msg && error_msg->empty()) *error_msg = msg;
+                return nullptr;
+            }
 
             layer.d_conv1d_weight = load_bf16_as_fp32(prefix + ".linear_attn.conv1d.weight", 10240 * 4);
-            layer.d_A_log         = load_bf16_as_fp32(prefix + ".linear_attn.A_log", 48);
-            layer.d_dt_bias       = load_bf16_as_fp32(prefix + ".linear_attn.dt_bias", 48);
-            layer.d_norm_weight   = load_bf16_as_fp32(prefix + ".linear_attn.norm.weight", 128);
+            if (!layer.d_conv1d_weight) {
+                std::string msg = "Failed to load linear_attn.conv1d.weight for layer " + std::to_string(l);
+                std::cerr << "[Error] " << msg << std::endl;
+                if (error_msg && error_msg->empty()) *error_msg = msg;
+                return nullptr;
+            }
+
+            layer.d_A_log = load_bf16_as_fp32(prefix + ".linear_attn.A_log", 48);
+            if (!layer.d_A_log) {
+                std::string msg = "Failed to load linear_attn.A_log for layer " + std::to_string(l);
+                std::cerr << "[Error] " << msg << std::endl;
+                if (error_msg && error_msg->empty()) *error_msg = msg;
+                return nullptr;
+            }
+
+            layer.d_dt_bias = load_bf16_as_fp32(prefix + ".linear_attn.dt_bias", 48);
+            if (!layer.d_dt_bias) {
+                std::string msg = "Failed to load linear_attn.dt_bias for layer " + std::to_string(l);
+                std::cerr << "[Error] " << msg << std::endl;
+                if (error_msg && error_msg->empty()) *error_msg = msg;
+                return nullptr;
+            }
+
+            layer.d_norm_weight = load_bf16_as_fp32(prefix + ".linear_attn.norm.weight", 128);
+            if (!layer.d_norm_weight) {
+                std::string msg = "Failed to load linear_attn.norm.weight for layer " + std::to_string(l);
+                std::cerr << "[Error] " << msg << std::endl;
+                if (error_msg && error_msg->empty()) *error_msg = msg;
+                return nullptr;
+            }
         }
 
         if ((l + 1) % 16 == 0 || l == model->config_.num_hidden_layers - 1) {
