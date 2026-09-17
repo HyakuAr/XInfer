@@ -46,6 +46,10 @@ private:
     int64_t* d_positions_{nullptr};
     float*   d_logits_{nullptr};
 
+    // Caller-owned shared scratch memory for argmax sampling reduction
+    float*   d_sample_max_{nullptr};
+    int64_t* d_sample_idx_{nullptr};
+
     // Fixed activation buffers (FP16 / sycl::half)
     LayerActivationBuffers bufs_;
 

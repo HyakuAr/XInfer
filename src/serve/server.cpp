@@ -591,6 +591,7 @@ void HttpServer::handle_client(uintptr_t client_socket) {
             choice.index = 0;
             choice.message.role = "assistant";
             choice.message.content = result.text;
+            choice.message.reasoning_content = result.reasoning_content;
             choice.finish_reason = result.finish_reason;
             resp.choices.push_back(std::move(choice));
 
@@ -629,15 +630,32 @@ void HttpServer::handle_client(uintptr_t client_socket) {
             init_chunk.choices.push_back(std::move(init_choice));
             send_string(sock, init_chunk.to_sse_event());
 
-            // Token callback streaming delta pieces
-            auto token_callback = [&](const std::string& piece, int64_t /*tok_id*/) -> bool {
+            // Token callback streaming delta pieces with reasoning tag filtering
+            bool stream_in_thinking = false;
+            int64_t think_start_id = engine_.think_start_token_id();
+            int64_t think_end_id = engine_.think_end_token_id();
+
+            auto token_callback = [&](const std::string& piece, int64_t tok_id) -> bool {
+                if (tok_id == think_start_id || piece == "<think>") {
+                    stream_in_thinking = true;
+                    return true;
+                }
+                if (tok_id == think_end_id || piece == "</think>") {
+                    stream_in_thinking = false;
+                    return true;
+                }
+
                 ChatCompletionChunk chunk;
                 chunk.id = req_id;
                 chunk.created = created_ts;
                 chunk.model = config_.model_id;
                 ChunkChoice ch;
                 ch.index = 0;
-                ch.delta.content = piece;
+                if (stream_in_thinking) {
+                    ch.delta.reasoning_content = piece;
+                } else {
+                    ch.delta.content = piece;
+                }
                 chunk.choices.push_back(std::move(ch));
                 return send_string(sock, chunk.to_sse_event());
             };

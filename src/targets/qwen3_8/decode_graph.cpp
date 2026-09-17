@@ -37,6 +37,10 @@ DecodeGraph::DecodeGraph(std::shared_ptr<core::DeviceContext> ctx,
     d_positions_ = sycl::malloc_device<int64_t>(1, q);
     d_logits_    = sycl::malloc_device<float>(vocab_size, q);
 
+    size_t sample_scratch_size = ops::argmax_scratch_size(vocab_size);
+    d_sample_max_ = sycl::malloc_shared<float>(sample_scratch_size, q);
+    d_sample_idx_ = sycl::malloc_shared<int64_t>(sample_scratch_size, q);
+
     bufs_.act_x        = sycl::malloc_device<sycl::half>(hidden_size, q);
     bufs_.act_normed   = sycl::malloc_device<sycl::half>(hidden_size, q);
     bufs_.act_proj_out = sycl::malloc_device<sycl::half>(hidden_size, q);
@@ -63,6 +67,9 @@ DecodeGraph::~DecodeGraph() {
     if (d_token_ids_) sycl::free(d_token_ids_, q);
     if (d_positions_) sycl::free(d_positions_, q);
     if (d_logits_)    sycl::free(d_logits_, q);
+
+    if (d_sample_max_) sycl::free(d_sample_max_, q);
+    if (d_sample_idx_) sycl::free(d_sample_idx_, q);
 
     if (bufs_.act_x)        sycl::free(bufs_.act_x, q);
     if (bufs_.act_normed)   sycl::free(bufs_.act_normed, q);
@@ -156,8 +163,8 @@ int64_t DecodeGraph::decode_step(int64_t input_token_id, size_t cur_pos) {
     // Replay the pre-compiled command list with zero host launch overhead
     q.ext_oneapi_graph(*exec_graph_);
 
-    // Greedy sampling from logits
-    int64_t next_token = ops::argmax(q, d_logits_, model_.config().vocab_size);
+    // Greedy sampling from logits using caller-owned preallocated shared scratch buffer
+    int64_t next_token = ops::argmax(q, d_logits_, model_.config().vocab_size, d_sample_max_, d_sample_idx_);
     return next_token;
 }
 

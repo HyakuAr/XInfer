@@ -302,6 +302,8 @@ public:
             // Resolve stop tokens dynamically from loaded tokenizer/config unless explicitly overridden (>= 0)
             int64_t eos_tok = (gen_config.eos_token_id >= 0) ? gen_config.eos_token_id : tokenizer_.eos_token_id();
             int64_t im_end_tok = (gen_config.im_end_token_id >= 0) ? gen_config.im_end_token_id : tokenizer_.im_end_token_id();
+            int64_t think_start_tok = tokenizer_.think_start_token_id();
+            int64_t think_end_tok = tokenizer_.think_end_token_id();
             if (eos_tok < 0) {
                 result.success = false;
                 result.error_code = "missing_eos_token";
@@ -317,17 +319,37 @@ public:
                 return result;
             }
 
-            result.token_ids.push_back(current_tok);
-            std::string first_piece = tokenizer_.decode_token(current_tok);
-            result.text += first_piece;
+            bool in_thinking = false;
+            auto process_token = [&](int64_t tok) -> bool {
+                result.token_ids.push_back(tok);
+                std::string piece = tokenizer_.decode_token(tok);
 
-            if (callback) {
-                if (!callback(first_piece, current_tok)) {
-                    result.generated_tokens = 1;
-                    result.finish_reason = "stop";
-                    result.total_time_sec = result.time_to_first_token_sec;
-                    return result;
+                if (tok == think_start_tok || piece == "<think>") {
+                    in_thinking = true;
+                    return true;
                 }
+                if (tok == think_end_tok || piece == "</think>") {
+                    in_thinking = false;
+                    return true;
+                }
+
+                if (in_thinking) {
+                    result.reasoning_content += piece;
+                } else {
+                    result.text += piece;
+                }
+
+                if (callback) {
+                    return callback(piece, tok);
+                }
+                return true;
+            };
+
+            if (!process_token(current_tok)) {
+                result.generated_tokens = 1;
+                result.finish_reason = "stop";
+                result.total_time_sec = result.time_to_first_token_sec;
+                return result;
             }
 
             // 2. Autoregressive single-token decode loop using persistent KV cache and captured command graph
@@ -366,18 +388,42 @@ public:
                     break;
                 }
 
-                result.token_ids.push_back(next_tok);
-                std::string piece = tokenizer_.decode_token(next_tok);
-                result.text += piece;
-
-                if (callback) {
-                    if (!callback(piece, next_tok)) {
-                        result.finish_reason = "stop";
-                        break;
-                    }
+                if (!process_token(next_tok)) {
+                    result.finish_reason = "stop";
+                    break;
                 }
 
                 current_tok = next_tok;
+            }
+
+            // Post-process: guarantee that raw <think>/</think> tags never leak into user-facing output
+            size_t t_start = result.text.find("<think>");
+            size_t t_end_pos = result.text.find("</think>");
+            if (t_start != std::string::npos) {
+                if (t_end_pos != std::string::npos && t_end_pos >= t_start) {
+                    if (result.reasoning_content.empty()) {
+                        result.reasoning_content = result.text.substr(t_start + 7, t_end_pos - (t_start + 7));
+                    }
+                    result.text.erase(t_start, (t_end_pos + 8) - t_start);
+                } else {
+                    if (result.reasoning_content.empty()) {
+                        result.reasoning_content = result.text.substr(t_start + 7);
+                    }
+                    result.text.erase(t_start);
+                }
+            }
+            size_t stray_end = result.text.find("</think>");
+            while (stray_end != std::string::npos) {
+                result.text.erase(stray_end, 8);
+                stray_end = result.text.find("</think>");
+            }
+            if (!result.reasoning_content.empty()) {
+                size_t first_non_ws = result.text.find_first_not_of("\r\n");
+                if (first_non_ws != std::string::npos) {
+                    result.text.erase(0, first_non_ws);
+                } else {
+                    result.text.clear();
+                }
             }
 
             auto t_end = std::chrono::high_resolution_clock::now();
@@ -430,6 +476,14 @@ public:
         return tokenizer_.im_end_token_id();
     }
 
+    int64_t think_start_token_id() const noexcept {
+        return tokenizer_.think_start_token_id();
+    }
+
+    int64_t think_end_token_id() const noexcept {
+        return tokenizer_.think_end_token_id();
+    }
+
     void reset() {
         if (kv_cache_) {
             kv_cache_->clear();
@@ -474,6 +528,14 @@ int64_t Engine::eos_token_id() const noexcept {
 
 int64_t Engine::im_end_token_id() const noexcept {
     return impl_->im_end_token_id();
+}
+
+int64_t Engine::think_start_token_id() const noexcept {
+    return impl_->think_start_token_id();
+}
+
+int64_t Engine::think_end_token_id() const noexcept {
+    return impl_->think_end_token_id();
 }
 
 std::string Engine::apply_chat_template(const std::vector<ChatMessage>& messages) const {

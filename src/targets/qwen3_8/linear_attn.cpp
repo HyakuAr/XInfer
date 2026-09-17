@@ -76,7 +76,7 @@ sycl::event causal_conv1d_silu_impl(sycl::queue& q,
         out_qkv[t * num_channels + c] = static_cast<OutT>(silu_val);
     });
 
-    // Update conv_state with the last up to 3 timesteps of in_qkv
+    // Update conv_state with the last up to 3 timesteps of in_qkv (seq_len >= 2 here since seq_len == 1 returned early)
     if (conv_state && seq_len > 0) {
         return q.parallel_for(sycl::range<1>(num_channels), [=](sycl::id<1> idx) {
             int64_t c = idx[0];
@@ -84,10 +84,6 @@ sycl::event causal_conv1d_silu_impl(sycl::queue& q,
                 conv_state[0 * num_channels + c] = static_cast<float>(in_qkv[(seq_len - 3) * num_channels + c]);
                 conv_state[1 * num_channels + c] = static_cast<float>(in_qkv[(seq_len - 2) * num_channels + c]);
                 conv_state[2 * num_channels + c] = static_cast<float>(in_qkv[(seq_len - 1) * num_channels + c]);
-            } else if (seq_len == 1) {
-                conv_state[0 * num_channels + c] = conv_state[1 * num_channels + c];
-                conv_state[1 * num_channels + c] = conv_state[2 * num_channels + c];
-                conv_state[2 * num_channels + c] = static_cast<float>(in_qkv[c]);
             } else if (seq_len == 2) {
                 conv_state[0 * num_channels + c] = conv_state[2 * num_channels + c];
                 conv_state[1 * num_channels + c] = static_cast<float>(in_qkv[0 * num_channels + c]);

@@ -68,6 +68,7 @@ struct ChatCompletionResponse {
 struct ChunkDelta {
     std::optional<std::string> role;
     std::optional<std::string> content;
+    std::optional<std::string> reasoning_content;
 };
 
 struct ChunkChoice {

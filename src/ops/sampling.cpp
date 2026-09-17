@@ -1,33 +1,31 @@
 #include "sampling.h"
+#include <mutex>
 #include <limits>
 #include <algorithm>
 
 namespace xinfer::ops {
 
-int64_t argmax(sycl::queue& q, const float* logits, int64_t vocab_size) {
+int64_t argmax(sycl::queue& q,
+               const float* logits,
+               int64_t vocab_size,
+               float* partial_max,
+               int64_t* partial_idx) {
     if (vocab_size <= 0 || !logits) return 0;
     if (vocab_size == 1) return 0;
 
     constexpr size_t WG_SIZE = 256;
     size_t num_wgs = (static_cast<size_t>(vocab_size) + WG_SIZE - 1) / WG_SIZE;
 
-    // Reusable shared memory buffer to avoid per-step OS/driver allocation overhead (191ms saved)
-    static std::mutex s_mtx;
-    static float* s_partial_max = nullptr;
-    static int64_t* s_partial_idx = nullptr;
-    static size_t s_capacity = 0;
+    // Caller-owned scratch buffer; fallback to ephemeral USM shared allocation if not provided
+    bool allocated_scratch = false;
+    float* p_max = partial_max;
+    int64_t* p_idx = partial_idx;
 
-    std::lock_guard<std::mutex> lock(s_mtx);
-    if (s_capacity < num_wgs) {
-        if (s_partial_max) sycl::free(s_partial_max, q);
-        if (s_partial_idx) sycl::free(s_partial_idx, q);
-        s_partial_max = sycl::malloc_shared<float>(num_wgs, q);
-        s_partial_idx = sycl::malloc_shared<int64_t>(num_wgs, q);
-        s_capacity = num_wgs;
+    if (!p_max || !p_idx) {
+        p_max = sycl::malloc_shared<float>(num_wgs, q);
+        p_idx = sycl::malloc_shared<int64_t>(num_wgs, q);
+        allocated_scratch = true;
     }
-
-    float* partial_max = s_partial_max;
-    int64_t* partial_idx = s_partial_idx;
 
     // Stage 1: Workgroup local reduction
     q.submit([&](sycl::handler& cgh) {
@@ -64,21 +62,26 @@ int64_t argmax(sycl::queue& q, const float* logits, int64_t vocab_size) {
             }
 
             if (local_i == 0) {
-                partial_max[wg_id] = local_max[0];
-                partial_idx[wg_id] = local_idx[0];
+                p_max[wg_id] = local_max[0];
+                p_idx[wg_id] = local_idx[0];
             }
         });
     }).wait();
 
     // Stage 2: Reduce partial workgroup results on host
-    float best_val = partial_max[0];
-    int64_t best_idx = partial_idx[0];
+    float best_val = p_max[0];
+    int64_t best_idx = p_idx[0];
 
     for (size_t i = 1; i < num_wgs; ++i) {
-        if (partial_max[i] > best_val) {
-            best_val = partial_max[i];
-            best_idx = partial_idx[i];
+        if (p_max[i] > best_val) {
+            best_val = p_max[i];
+            best_idx = p_idx[i];
         }
+    }
+
+    if (allocated_scratch) {
+        sycl::free(p_max, q);
+        sycl::free(p_idx, q);
     }
 
     return best_idx;

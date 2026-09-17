@@ -290,6 +290,57 @@ void test_top_p_parsing() {
     std::cout << "  -> PASSED: top_p parameter correctly parsed." << std::endl;
 }
 
+void test_reasoning_content_serialization() {
+    std::cout << "[Test 9/9] Reasoning content serialization in response and streaming SSE..." << std::endl;
+
+    // 1. Non-streaming ChatCompletionResponse with reasoning_content
+    ChatCompletionResponse resp;
+    resp.id = "chatcmpl-reasoning123";
+    resp.created = 1726480000;
+    resp.model = "qwen3.8-27b";
+
+    ChatChoice choice;
+    choice.index = 0;
+    choice.message.role = "assistant";
+    choice.message.content = "42 is the answer.";
+    choice.message.reasoning_content = "Thinking about the meaning of life...";
+    choice.finish_reason = "stop";
+    resp.choices.push_back(choice);
+
+    std::string json = resp.to_json();
+    JsonValue root;
+    std::string err;
+    assert(parse_json(json, root, err));
+    const auto* choices = root.find("choices");
+    assert(choices && choices->arr_val.size() == 1);
+    const auto* msg = choices->arr_val[0].find("message");
+    assert(msg && msg->get_string("content") == "42 is the answer.");
+    assert(msg && msg->get_string("reasoning_content") == "Thinking about the meaning of life...");
+
+    // 2. Streaming ChatCompletionChunk with delta.reasoning_content
+    ChatCompletionChunk chunk;
+    chunk.id = "chatcmpl-stream-reasoning";
+    chunk.created = 1726480001;
+    chunk.model = "qwen3.8-27b";
+
+    ChunkChoice ch;
+    ch.index = 0;
+    ch.delta.reasoning_content = " step 1";
+    chunk.choices.push_back(ch);
+
+    std::string sse = chunk.to_sse_event();
+    assert(sse.rfind("data: ", 0) == 0);
+    std::string json_part = sse.substr(6, sse.size() - 8);
+    JsonValue sse_root;
+    assert(parse_json(json_part, sse_root, err));
+    const auto* sse_choices = sse_root.find("choices");
+    assert(sse_choices && sse_choices->arr_val.size() == 1);
+    const auto* delta = sse_choices->arr_val[0].find("delta");
+    assert(delta && delta->get_string("reasoning_content") == " step 1");
+
+    std::cout << "  -> PASSED: reasoning_content correctly serialized in non-streaming and streaming schemas." << std::endl;
+}
+
 int main() {
     std::cout << "==========================================================" << std::endl;
     std::cout << " xinfer Milestone 9 OpenAI Serving Protocol & Schema Test" << std::endl;
@@ -303,9 +354,11 @@ int main() {
     test_context_length_exceeded_error();
     test_utf16_surrogate_pairs();
     test_top_p_parsing();
+    test_reasoning_content_serialization();
 
     std::cout << "==========================================================" << std::endl;
     std::cout << " ALL MILESTONE 9 SCHEMA TESTS PASSED!" << std::endl;
     std::cout << "==========================================================" << std::endl;
     return 0;
 }
+

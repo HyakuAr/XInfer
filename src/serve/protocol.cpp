@@ -369,6 +369,10 @@ std::string ChatCompletionResponse::to_json() const {
         escape_json_string(out, choices[i].message.role);
         out += ",\"content\":";
         escape_json_string(out, choices[i].message.content);
+        if (!choices[i].message.reasoning_content.empty()) {
+            out += ",\"reasoning_content\":";
+            escape_json_string(out, choices[i].message.reasoning_content);
+        }
         out += "}";
         out += ",\"finish_reason\":";
         escape_json_string(out, choices[i].finish_reason);
@@ -411,6 +415,13 @@ std::string ChatCompletionChunk::to_sse_event() const {
             if (!first) json += ",";
             json += "\"content\":";
             escape_json_string(json, *choices[i].delta.content);
+            first = false;
+        }
+        if (choices[i].delta.reasoning_content.has_value()) {
+            if (!first) json += ",";
+            json += "\"reasoning_content\":";
+            escape_json_string(json, *choices[i].delta.reasoning_content);
+            first = false;
         }
         json += "}";
         if (choices[i].finish_reason.has_value()) {

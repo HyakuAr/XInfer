@@ -141,6 +141,10 @@ int main() {
     q.memcpy(d_token_ids, &init_tok, sizeof(int64_t)).wait();
     q.memcpy(d_positions, &init_pos, sizeof(int64_t)).wait();
 
+    size_t sample_scratch_size = ops::argmax_scratch_size(vocab_size);
+    float* d_sample_max = sycl::malloc_shared<float>(sample_scratch_size, q);
+    int64_t* d_sample_idx = sycl::malloc_shared<int64_t>(sample_scratch_size, q);
+
     std::cout << "Warming up kernels and memory on B60..." << std::endl;
     // Warmup step to ensure all JIT kernels are compiled and USM buffers are resident
     {
@@ -150,7 +154,7 @@ int main() {
                          static_cast<const uint8_t*>(model->lm_head().d_weights_int4),
                          static_cast<const sycl::half*>(model->lm_head().d_scales),
                          nullptr, 1, vocab_size, hidden_size);
-        ops::argmax(q, d_logits, vocab_size);
+        ops::argmax(q, d_logits, vocab_size, d_sample_max, d_sample_idx);
         q.wait();
     }
     std::cout << "Starting profiled decode step measurement on B60..." << std::endl;
@@ -383,7 +387,7 @@ int main() {
 
     // Sampling Argmax
     auto t_sample_0 = std::chrono::high_resolution_clock::now();
-    int64_t next_tok = ops::argmax(q, d_logits, vocab_size);
+    int64_t next_tok = ops::argmax(q, d_logits, vocab_size, d_sample_max, d_sample_idx);
     (void)next_tok;
     q.wait();
     auto t_sample_1 = std::chrono::high_resolution_clock::now();
@@ -487,6 +491,8 @@ int main() {
     sycl::free(act_b, q);
     sycl::free(act_a, q);
     sycl::free(act_delta_out, q);
+    sycl::free(d_sample_max, q);
+    sycl::free(d_sample_idx, q);
 
     return 0;
 }

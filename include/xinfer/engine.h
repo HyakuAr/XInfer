@@ -38,6 +38,7 @@ using TokenCallback = std::function<bool(const std::string& token_piece, int64_t
 
 struct GenerationResult {
     std::string          text;
+    std::string          reasoning_content; // Extracted reasoning content from <think>...</think>
     std::vector<int64_t> token_ids;
     size_t               prompt_tokens{0};
     size_t               generated_tokens{0};
@@ -74,6 +75,8 @@ public:
     // Query special token IDs resolved dynamically from loaded model/tokenizer (source of truth)
     int64_t eos_token_id() const noexcept;
     int64_t im_end_token_id() const noexcept;
+    int64_t think_start_token_id() const noexcept;
+    int64_t think_end_token_id() const noexcept;
 
     // Format messages with the loaded model's real chat template (chat_template.jinja)
     std::string apply_chat_template(const std::vector<ChatMessage>& messages) const;

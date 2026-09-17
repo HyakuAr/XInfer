@@ -4,6 +4,7 @@
 #include "ops/linear.h"
 #include "ops/attention.h"
 #include "ops/rmsnorm.h"
+#include "targets/qwen3_8/linear_attn.h"
 
 #include <sycl/sycl.hpp>
 #include <sycl/ext/oneapi/experimental/graph.hpp>
@@ -14,6 +15,90 @@
 
 namespace syclex = sycl::ext::oneapi::experimental;
 using namespace xinfer;
+
+void test_causal_conv1d_chunk_boundaries(sycl::queue& q) {
+    std::cout << "\nTesting causal_conv1d_silu seq_len=1 and seq_len=2 chunk boundaries..." << std::endl;
+    constexpr int64_t num_channels = 10240;
+
+    // Allocate USM device buffers
+    float* conv_w = sycl::malloc_device<float>(num_channels * 4, q);
+    float* conv_state = sycl::malloc_device<float>(3 * num_channels, q);
+    float* in_qkv = sycl::malloc_device<float>(2 * num_channels, q);
+    float* out_qkv = sycl::malloc_device<float>(2 * num_channels, q);
+
+    // Fill conv_w: weights [0.1, 0.2, 0.3, 0.4] per channel
+    std::vector<float> h_conv_w(num_channels * 4);
+    for (size_t c = 0; c < num_channels; ++c) {
+        h_conv_w[c * 4 + 0] = 0.1f;
+        h_conv_w[c * 4 + 1] = 0.2f;
+        h_conv_w[c * 4 + 2] = 0.3f;
+        h_conv_w[c * 4 + 3] = 0.4f;
+    }
+    q.memcpy(conv_w, h_conv_w.data(), h_conv_w.size() * sizeof(float));
+
+    // Zero out conv_state
+    q.fill(conv_state, 0.0f, 3 * num_channels);
+
+    // 1. Test seq_len = 1: pass in token 0 with value 1.0f
+    q.fill(in_qkv, 1.0f, num_channels);
+    q.wait();
+
+    targets::qwen3_8::causal_conv1d_silu(q, out_qkv, in_qkv, conv_w, 1, conv_state).wait();
+
+    // Verify output for seq_len = 1: sum = 0.4 * 1.0 = 0.4. silu = 0.4 / (1 + exp(-0.4))
+    std::vector<float> h_out(num_channels);
+    q.memcpy(h_out.data(), out_qkv, num_channels * sizeof(float)).wait();
+    float expected_silu_1 = 0.4f / (1.0f + std::exp(-0.4f));
+    assert(std::abs(h_out[0] - expected_silu_1) < 1e-4f);
+
+    // Verify conv_state after seq_len = 1: [s1, s2, in_val] = [0.0, 0.0, 1.0]
+    std::vector<float> h_state(3 * num_channels);
+    q.memcpy(h_state.data(), conv_state, 3 * num_channels * sizeof(float)).wait();
+    assert(std::abs(h_state[0 * num_channels + 0] - 0.0f) < 1e-4f);
+    assert(std::abs(h_state[1 * num_channels + 0] - 0.0f) < 1e-4f);
+    assert(std::abs(h_state[2 * num_channels + 0] - 1.0f) < 1e-4f);
+
+    // 2. Test seq_len = 2: pass in tokens with values [2.0f, 3.0f]
+    std::vector<float> h_in_2(2 * num_channels);
+    for (size_t c = 0; c < num_channels; ++c) {
+        h_in_2[0 * num_channels + c] = 2.0f;
+        h_in_2[1 * num_channels + c] = 3.0f;
+    }
+    q.memcpy(in_qkv, h_in_2.data(), h_in_2.size() * sizeof(float)).wait();
+
+    targets::qwen3_8::causal_conv1d_silu(q, out_qkv, in_qkv, conv_w, 2, conv_state).wait();
+
+    // Verify output:
+    // For t = 0 (val = 2.0f):
+    // past timesteps: -3 -> s0 (0.0), -2 -> s1 (0.0), -1 -> s2 (1.0), 0 -> 2.0
+    // sum0 = 0.1*0 + 0.2*0 + 0.3*1.0 + 0.4*2.0 = 0.3 + 0.8 = 1.1
+    // For t = 1 (val = 3.0f):
+    // past timesteps: -2 -> s1 (0.0), -1 -> s2 (1.0), 0 -> 2.0, 1 -> 3.0
+    // sum1 = 0.1*0 + 0.2*1.0 + 0.3*2.0 + 0.4*3.0 = 0.2 + 0.6 + 1.2 = 2.0
+    std::vector<float> h_out_2(2 * num_channels);
+    q.memcpy(h_out_2.data(), out_qkv, 2 * num_channels * sizeof(float)).wait();
+    float exp_silu_t0 = 1.1f / (1.0f + std::exp(-1.1f));
+    float exp_silu_t1 = 2.0f / (1.0f + std::exp(-2.0f));
+    assert(std::abs(h_out_2[0 * num_channels + 0] - exp_silu_t0) < 1e-4f);
+    assert(std::abs(h_out_2[1 * num_channels + 0] - exp_silu_t1) < 1e-4f);
+
+    // Verify conv_state after seq_len = 2:
+    // state shifts by 2:
+    // conv_state[0] = old conv_state[2] = 1.0f
+    // conv_state[1] = in_qkv[0] = 2.0f
+    // conv_state[2] = in_qkv[1] = 3.0f
+    q.memcpy(h_state.data(), conv_state, 3 * num_channels * sizeof(float)).wait();
+    assert(std::abs(h_state[0 * num_channels + 0] - 1.0f) < 1e-4f);
+    assert(std::abs(h_state[1 * num_channels + 0] - 2.0f) < 1e-4f);
+    assert(std::abs(h_state[2 * num_channels + 0] - 3.0f) < 1e-4f);
+
+    std::cout << "  -> PASSED: Causal Conv1D chunk-boundary state transitions verified for seq_len=1 and seq_len=2." << std::endl;
+
+    sycl::free(conv_w, q);
+    sycl::free(conv_state, q);
+    sycl::free(in_qkv, q);
+    sycl::free(out_qkv, q);
+}
 
 int main() {
     std::cout << "==========================================================" << std::endl;
@@ -94,8 +179,11 @@ int main() {
     sycl::free(k_cache, q);
     sycl::free(v_cache, q);
 
-    std::cout << "==========================================================" << std::endl;
-    std::cout << " ALL M8 DECODE GRAPH TESTS PASSED ON B60!" << std::endl;
+    // 3. Run chunk-boundary test
+    test_causal_conv1d_chunk_boundaries(q);
+
+    std::cout << "\n==========================================================" << std::endl;
+    std::cout << " ALL M8 DECODE GRAPH & LINEAR ATTN TESTS PASSED ON B60!" << std::endl;
     std::cout << "==========================================================" << std::endl;
     return 0;
 }
