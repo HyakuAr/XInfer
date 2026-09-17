@@ -100,6 +100,27 @@ int main() {
     std::cout << "      Tokenizer: " << read_meta.tokenizer_type << std::endl;
     std::cout << "      Custom Properties Count: " << read_meta.properties.size() << std::endl;
 
+    // Test UTF-16 surrogate pairs in metadata JSON parser
+    std::string test_meta_json = R"({
+        "model_name": "Test/\uD83D\uDE00-Model",
+        "quant_scheme": "\uD83D\uDE80-Fast",
+        "tokenizer_type": "bpe",
+        "properties": {
+            "description": "Hello \uD83D\uDC4B \uD83C\uDF0D"
+        }
+    })";
+    auto opt_meta = ArtifactMetadata::from_json(test_meta_json);
+    assert(opt_meta.has_value());
+    assert(opt_meta->model_name == "Test/\xF0\x9F\x98\x80-Model");
+    assert(opt_meta->quant_scheme == "\xF0\x9F\x9A\x80-Fast");
+    assert(opt_meta->properties.at("description") == "Hello \xF0\x9F\x91\x8B \xF0\x9F\x8C\x8D");
+    std::cout << "      UTF-16 surrogate pairs parsed successfully in metadata!" << std::endl;
+
+    // Verify rejection of unpaired surrogate
+    std::string bad_meta_json = "{\"model_name\": \"\\uD83D\"}";
+    auto bad_opt = ArtifactMetadata::from_json(bad_meta_json);
+    assert(!bad_opt.has_value());
+
     // 6. Verify Section Table & 64-byte alignments
     std::cout << "[4/5] Verifying section table and 64-byte alignment ..." << std::endl;
     auto section_names = reader.list_sections();

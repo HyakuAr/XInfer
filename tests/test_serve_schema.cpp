@@ -213,6 +213,75 @@ void test_context_length_exceeded_error() {
     std::cout << "  -> PASSED: context_length_exceeded matches OpenAI error schema." << std::endl;
 }
 
+void test_utf16_surrogate_pairs() {
+    std::cout << "[Test 7/8] Parse UTF-16 surrogate pairs and unicode escapes..." << std::endl;
+
+    // 1. Valid emoji / astral plane: \uD83D\uDE00 -> 😀 (U+1F600, UTF-8: \xF0\x9F\x98\x80)
+    std::string json1 = "{\"emoji\": \"\\uD83D\\uDE00\"}";
+    JsonValue v1;
+    std::string err1;
+    assert(parse_json(json1, v1, err1));
+    assert(v1.get_string("emoji") == "\xF0\x9F\x98\x80");
+
+    // 2. Musical symbol G clef: \uD834\uDD1E -> 𝄞 (U+1D11E, UTF-8: \xF0\x9D\x84\x9E)
+    std::string json2 = "{\"clef\": \"\\uD834\\uDD1E\"}";
+    JsonValue v2;
+    std::string err2;
+    assert(parse_json(json2, v2, err2));
+    assert(v2.get_string("clef") == "\xF0\x9D\x84\x9E");
+
+    // 3. Mixed standard unicode and surrogate pairs:
+    // \u0041 (A) + \u00E9 (é) + \u4E2D (中) + \uD83D\uDE80 (🚀)
+    std::string json3 = "{\"text\": \"\\u0041\\u00E9\\u4E2D\\uD83D\\uDE80\"}";
+    JsonValue v3;
+    std::string err3;
+    assert(parse_json(json3, v3, err3));
+    assert(v3.get_string("text") == "A\xC3\xA9\xE4\xB8\xAD\xF0\x9F\x9A\x80");
+
+    // 4. In request body messages:
+    std::string req_json = "{\"messages\": [{\"role\": \"user\", \"content\": \"Hello \\uD83D\\uDC4B\\uD83C\\uDF0D\"}]}";
+    ChatCompletionRequest req;
+    ApiError api_err;
+    assert(parse_chat_completion_request(req_json, req, api_err));
+    assert(req.messages.size() == 1);
+    // 👋 (U+1F44B: \xF0\x9F\x91\x8B) + 🌍 (U+1F30D: \xF0\x9F\x8C\x8D)
+    assert(req.messages[0].content == "Hello \xF0\x9F\x91\x8B\xF0\x9F\x8C\x8D");
+
+    // 5. Error case: unpaired high surrogate
+    std::string bad_json1 = "{\"str\": \"\\uD83D\"}";
+    JsonValue bad_v1;
+    std::string bad_err1;
+    assert(!parse_json(bad_json1, bad_v1, bad_err1));
+
+    // 6. Error case: unpaired low surrogate
+    std::string bad_json2 = "{\"str\": \"\\uDE00\"}";
+    JsonValue bad_v2;
+    std::string bad_err2;
+    assert(!parse_json(bad_json2, bad_v2, bad_err2));
+
+    std::cout << "  -> PASSED: UTF-16 surrogate pairs and astral characters properly decoded to UTF-8." << std::endl;
+}
+
+void test_top_p_parsing() {
+    std::cout << "[Test 8/8] Parse top_p parameter in ChatCompletionRequest..." << std::endl;
+
+    // Default top_p is 1.0
+    std::string json_def = "{\"messages\": [{\"role\": \"user\", \"content\": \"hi\"}]}";
+    ChatCompletionRequest req_def;
+    ApiError err_def;
+    assert(parse_chat_completion_request(json_def, req_def, err_def));
+    assert(std::abs(req_def.top_p - 1.0f) < 1e-4);
+
+    // Explicit top_p
+    std::string json_p = "{\"messages\": [{\"role\": \"user\", \"content\": \"hi\"}], \"top_p\": 0.95}";
+    ChatCompletionRequest req_p;
+    ApiError err_p;
+    assert(parse_chat_completion_request(json_p, req_p, err_p));
+    assert(std::abs(req_p.top_p - 0.95f) < 1e-4);
+
+    std::cout << "  -> PASSED: top_p parameter correctly parsed." << std::endl;
+}
+
 int main() {
     std::cout << "==========================================================" << std::endl;
     std::cout << " xinfer Milestone 9 OpenAI Serving Protocol & Schema Test" << std::endl;
@@ -224,6 +293,8 @@ int main() {
     test_response_json_serialization();
     test_streaming_sse_event_serialization();
     test_context_length_exceeded_error();
+    test_utf16_surrogate_pairs();
+    test_top_p_parsing();
 
     std::cout << "==========================================================" << std::endl;
     std::cout << " ALL MILESTONE 9 SCHEMA TESTS PASSED!" << std::endl;

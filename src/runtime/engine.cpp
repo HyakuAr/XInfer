@@ -215,6 +215,32 @@ public:
                 return result;
             }
 
+            if (gen_config.temperature < 0.0f) {
+                std::cerr << "[xinfer::Engine] Error: Invalid temperature (" << gen_config.temperature << " < 0.0)" << std::endl;
+                result.success = false;
+                result.error_code = "invalid_parameter";
+                result.error_msg = "Invalid temperature: must be >= 0.0";
+                return result;
+            }
+            if (gen_config.temperature != 0.0f) {
+                std::cerr << "[xinfer::Engine] Error: Non-zero temperature (" << gen_config.temperature
+                          << ") is not supported (only greedy argmax sampling temperature=0.0 is implemented)" << std::endl;
+                result.success = false;
+                result.error_code = "unsupported_parameter";
+                result.error_msg = "Currently only greedy decoding (temperature=0.0) is supported. Received temperature=" +
+                                   std::to_string(gen_config.temperature) + ". Non-zero temperature sampling is not yet supported.";
+                return result;
+            }
+            if (gen_config.top_p != 1.0f) {
+                std::cerr << "[xinfer::Engine] Error: Non-default top_p (" << gen_config.top_p
+                          << ") is not supported (only greedy argmax sampling top_p=1.0 is implemented)" << std::endl;
+                result.success = false;
+                result.error_code = "unsupported_parameter";
+                result.error_msg = "Currently only greedy decoding (top_p=1.0) is supported. Received top_p=" +
+                                   std::to_string(gen_config.top_p) + ". Nucleus (top-p) sampling is not yet supported.";
+                return result;
+            }
+
             // Format prompt
             std::string input_text = prompt;
             if (gen_config.apply_chat_template) {

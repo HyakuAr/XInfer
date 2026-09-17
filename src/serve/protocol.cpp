@@ -206,18 +206,59 @@ private:
                     case 'u': {
                         if (pos_ + 4 > in_.size()) { err = "Invalid unicode escape"; return false; }
                         std::string hex_str(in_.substr(pos_, 4));
+                        for (char h : hex_str) {
+                            if (!std::isxdigit(static_cast<unsigned char>(h))) {
+                                err = "Invalid hex digit in unicode escape";
+                                return false;
+                            }
+                        }
                         pos_ += 4;
                         try {
                             uint32_t cp = std::stoul(hex_str, nullptr, 16);
+                            if (cp >= 0xD800 && cp <= 0xDBFF) {
+                                // High surrogate - check for following low surrogate \uXXXX
+                                if (pos_ + 6 <= in_.size() && in_[pos_] == '\\' && in_[pos_ + 1] == 'u') {
+                                    std::string low_hex(in_.substr(pos_ + 2, 4));
+                                    for (char h : low_hex) {
+                                        if (!std::isxdigit(static_cast<unsigned char>(h))) {
+                                            err = "Invalid hex digit in low surrogate";
+                                            return false;
+                                        }
+                                    }
+                                    uint32_t low = std::stoul(low_hex, nullptr, 16);
+                                    if (low >= 0xDC00 && low <= 0xDFFF) {
+                                        pos_ += 6;
+                                        cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                                    } else {
+                                        err = "Invalid UTF-16 low surrogate in unicode escape";
+                                        return false;
+                                    }
+                                } else {
+                                    err = "Expected UTF-16 low surrogate after high surrogate";
+                                    return false;
+                                }
+                            } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                                err = "Unpaired UTF-16 low surrogate in unicode escape";
+                                return false;
+                            }
+
                             if (cp < 0x80) {
                                 out.push_back(static_cast<char>(cp));
                             } else if (cp < 0x800) {
                                 out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
                                 out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-                            } else {
+                            } else if (cp < 0x10000) {
                                 out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
                                 out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
                                 out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+                            } else if (cp <= 0x10FFFF) {
+                                out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+                                out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+                                out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+                                out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+                            } else {
+                                err = "Unicode code point out of range";
+                                return false;
                             }
                         } catch (...) {
                             err = "Failed to parse unicode escape";
@@ -448,6 +489,7 @@ bool parse_chat_completion_request(std::string_view json_str,
     out_req.model = root.get_string("model", "qwen3.8-27b");
     out_req.max_tokens = static_cast<int>(root.get_int("max_tokens", 256));
     out_req.temperature = static_cast<float>(root.get_double("temperature", 0.0));
+    out_req.top_p = static_cast<float>(root.get_double("top_p", 1.0));
     out_req.stream = root.get_bool("stream", false);
 
     const auto* msgs = root.find("messages");

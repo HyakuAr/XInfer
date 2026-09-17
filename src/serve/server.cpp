@@ -40,8 +40,6 @@ namespace xinfer::serve {
 
 namespace {
 
-std::mutex g_engine_mutex;
-
 bool send_all(socket_t sock, const char* data, size_t len) {
     size_t total_sent = 0;
     while (total_sent < len) {
@@ -129,9 +127,17 @@ bool HttpServer::start(const ServerConfig& config, std::string* error_msg) {
     server_socket_ = static_cast<uintptr_t>(listen_fd);
     is_running_.store(true);
 
+    // Launch bounded worker thread pool (matching the 1-8 concurrency contract)
+    size_t num_workers = std::clamp<size_t>(config_.num_workers, 1, 8);
+    worker_threads_.clear();
+    worker_threads_.reserve(num_workers);
+    for (size_t i = 0; i < num_workers; ++i) {
+        worker_threads_.emplace_back(&HttpServer::worker_loop, this);
+    }
+
     std::cout << "[xinfer-serve] OpenAI HTTP Server listening at http://"
               << (config_.host.empty() ? "0.0.0.0" : config_.host) << ":" << config_.port
-              << " (endpoints: /v1/chat/completions, /v1/models, /health)" << std::endl;
+              << " (" << num_workers << " workers, endpoints: /v1/chat/completions, /v1/models, /health)" << std::endl;
 
     accept_thread_ = std::thread(&HttpServer::accept_loop, this);
     return true;
@@ -149,11 +155,37 @@ void HttpServer::stop() {
     if (accept_thread_.joinable()) {
         accept_thread_.join();
     }
+
+    // Wake up and join worker threads
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        queue_cv_.notify_all();
+    }
+
+    for (auto& worker : worker_threads_) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+    worker_threads_.clear();
+
+    // Drain and close remaining queued sockets
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    while (!client_queue_.empty()) {
+        socket_t s = static_cast<socket_t>(client_queue_.front());
+        client_queue_.pop();
+        CLOSE_SOCKET(s);
+    }
 }
 
 void HttpServer::wait() {
     if (accept_thread_.joinable()) {
         accept_thread_.join();
+    }
+    for (auto& worker : worker_threads_) {
+        if (worker.joinable()) {
+            worker.join();
+        }
     }
 }
 
@@ -174,8 +206,64 @@ void HttpServer::accept_loop() {
             continue;
         }
 
-        // Handle client connection synchronously (serialized inference per AGENTS.md single-resident model contract)
-        handle_client(static_cast<uintptr_t>(client_fd));
+        // Bounded queue: enqueue or reject with 503 if backlog is full
+        bool enqueued = false;
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            if (client_queue_.size() < config_.max_queued_requests) {
+                client_queue_.push(static_cast<uintptr_t>(client_fd));
+                enqueued = true;
+            }
+        }
+
+        if (enqueued) {
+            queue_cv_.notify_one();
+        } else {
+            ApiError err;
+            err.status_code = 503;
+            err.type = "server_error";
+            err.code = "server_busy";
+            err.message = "Server busy: maximum queued requests reached (" +
+                          std::to_string(config_.max_queued_requests) + ")";
+            std::string err_body = err.to_json();
+            std::string resp =
+                "HTTP/1.1 503 Service Unavailable\r\n"
+                "Content-Type: application/json\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
+                "Content-Length: " + std::to_string(err_body.size()) + "\r\n"
+                "Connection: close\r\n\r\n" + err_body;
+            send_string(client_fd, resp);
+            CLOSE_SOCKET(client_fd);
+        }
+    }
+}
+
+void HttpServer::worker_loop() {
+    while (is_running_.load()) {
+        uintptr_t client_sock = ~static_cast<uintptr_t>(0);
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+            queue_cv_.wait(lock, [this] {
+                return !is_running_.load() || !client_queue_.empty();
+            });
+            if (!is_running_.load() && client_queue_.empty()) {
+                break;
+            }
+            if (!client_queue_.empty()) {
+                client_sock = client_queue_.front();
+                client_queue_.pop();
+            }
+        }
+
+        if (client_sock != ~static_cast<uintptr_t>(0)) {
+            try {
+                handle_client(client_sock);
+            } catch (const std::exception& e) {
+                std::cerr << "[xinfer-serve] Exception caught in worker_loop: " << e.what() << std::endl;
+            } catch (...) {
+                std::cerr << "[xinfer-serve] Unknown exception caught in worker_loop" << std::endl;
+            }
+        }
     }
 }
 
@@ -338,14 +426,116 @@ void HttpServer::handle_client(uintptr_t client_socket) {
         return;
     }
 
-    std::string prompt = engine_.apply_chat_template(req.messages);
+    // Validate sampling parameters (only greedy argmax: temperature == 0.0, top_p == 1.0 is currently supported)
+    if (req.temperature < 0.0f) {
+        ApiError err;
+        err.status_code = 400;
+        err.type = "invalid_request_error";
+        err.param = "temperature";
+        err.code = "invalid_parameter";
+        err.message = "Invalid temperature: must be >= 0.0";
+        std::string err_body = err.to_json();
+        std::string resp =
+            "HTTP/1.1 400 Bad Request\r\n"
+            "Content-Type: application/json\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Content-Length: " + std::to_string(err_body.size()) + "\r\n"
+            "Connection: close\r\n\r\n" + err_body;
+        send_string(sock, resp);
+        CLOSE_SOCKET(sock);
+        return;
+    }
+
+    if (req.temperature != 0.0f) {
+        ApiError err;
+        err.status_code = 400;
+        err.type = "invalid_request_error";
+        err.param = "temperature";
+        err.code = "unsupported_parameter";
+        err.message = "Currently only greedy decoding (temperature=0.0) is supported. Received temperature=" +
+                      std::to_string(req.temperature) + ". Non-zero temperature sampling is not yet supported.";
+        std::string err_body = err.to_json();
+        std::string resp =
+            "HTTP/1.1 400 Bad Request\r\n"
+            "Content-Type: application/json\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Content-Length: " + std::to_string(err_body.size()) + "\r\n"
+            "Connection: close\r\n\r\n" + err_body;
+        send_string(sock, resp);
+        CLOSE_SOCKET(sock);
+        return;
+    }
+
+    if (req.top_p != 1.0f) {
+        ApiError err;
+        err.status_code = 400;
+        err.type = "invalid_request_error";
+        err.param = "top_p";
+        err.code = "unsupported_parameter";
+        err.message = "Currently only greedy decoding (top_p=1.0) is supported. Received top_p=" +
+                      std::to_string(req.top_p) + ". Nucleus (top-p) sampling is not yet supported.";
+        std::string err_body = err.to_json();
+        std::string resp =
+            "HTTP/1.1 400 Bad Request\r\n"
+            "Content-Type: application/json\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Content-Length: " + std::to_string(err_body.size()) + "\r\n"
+            "Connection: close\r\n\r\n" + err_body;
+        send_string(sock, resp);
+        CLOSE_SOCKET(sock);
+        return;
+    }
+
+    // Format prompt with model chat template inside exception boundary
+    std::string prompt;
+    try {
+        prompt = engine_.apply_chat_template(req.messages);
+    } catch (const std::exception& e) {
+        ApiError err;
+        err.status_code = 400;
+        err.type = "invalid_request_error";
+        err.code = "chat_template_error";
+        err.message = std::string("Failed to format prompt with chat template: ") + e.what();
+        std::string err_body = err.to_json();
+        std::string resp =
+            "HTTP/1.1 400 Bad Request\r\n"
+            "Content-Type: application/json\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Content-Length: " + std::to_string(err_body.size()) + "\r\n"
+            "Connection: close\r\n\r\n" + err_body;
+        send_string(sock, resp);
+        CLOSE_SOCKET(sock);
+        return;
+    }
+
     GenerationConfig gen_cfg;
     gen_cfg.max_new_tokens = req.max_tokens;
     gen_cfg.temperature = req.temperature;
+    gen_cfg.top_p = req.top_p;
     gen_cfg.apply_chat_template = false; // already formatted via engine's real chat template
 
-    // Validate prompt tokens and max_tokens against model context length
-    size_t prompt_tokens = engine_.count_tokens(prompt, false);
+    // Validate prompt tokens and max_tokens against model context length inside exception boundary
+    size_t prompt_tokens = 0;
+    try {
+        prompt_tokens = engine_.count_tokens(prompt, false);
+    } catch (const std::exception& e) {
+        ApiError err;
+        err.status_code = 400;
+        err.type = "invalid_request_error";
+        err.code = "tokenization_error";
+        err.message = std::string("Failed to tokenize prompt: ") + e.what();
+        std::string err_body = err.to_json();
+        std::string resp =
+            "HTTP/1.1 400 Bad Request\r\n"
+            "Content-Type: application/json\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Content-Length: " + std::to_string(err_body.size()) + "\r\n"
+            "Connection: close\r\n\r\n" + err_body;
+        send_string(sock, resp);
+        CLOSE_SOCKET(sock);
+        return;
+    }
+
     std::string context_err;
     if (!engine_.validate_tokens(prompt_tokens, req.max_tokens, &context_err)) {
         ApiError err = make_context_length_exceeded_error(engine_.max_seq_len(), prompt_tokens, req.max_tokens);
@@ -367,7 +557,7 @@ void HttpServer::handle_client(uintptr_t client_socket) {
 
     // 4. Execute inference serialized via public Engine interface
     try {
-        std::lock_guard<std::mutex> lock(g_engine_mutex);
+        std::lock_guard<std::mutex> lock(engine_mutex_);
 
         if (!req.stream) {
             // --- Non-Streaming Response ---

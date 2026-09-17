@@ -126,15 +126,50 @@ private:
                     case 't':  out.push_back('\t'); break;
                     case 'u': {
                         if (pos_ + 4 > input_.size()) return false;
-                        // Skip 4 hex digits for simplicity or decode ascii
                         std::string hex(input_.substr(pos_, 4));
+                        for (char h : hex) {
+                            if (!std::isxdigit(static_cast<unsigned char>(h))) return false;
+                        }
                         pos_ += 4;
                         try {
-                            auto codepoint = std::stoul(hex, nullptr, 16);
-                            if (codepoint < 0x80) {
-                                out.push_back(static_cast<char>(codepoint));
+                            uint32_t cp = std::stoul(hex, nullptr, 16);
+                            if (cp >= 0xD800 && cp <= 0xDBFF) {
+                                // High surrogate - check for following low surrogate \uXXXX
+                                if (pos_ + 6 <= input_.size() && input_[pos_] == '\\' && input_[pos_ + 1] == 'u') {
+                                    std::string low_hex(input_.substr(pos_ + 2, 4));
+                                    for (char h : low_hex) {
+                                        if (!std::isxdigit(static_cast<unsigned char>(h))) return false;
+                                    }
+                                    uint32_t low = std::stoul(low_hex, nullptr, 16);
+                                    if (low >= 0xDC00 && low <= 0xDFFF) {
+                                        pos_ += 6;
+                                        cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                                    } else {
+                                        return false;
+                                    }
+                                } else {
+                                    return false;
+                                }
+                            } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                                return false; // Unpaired low surrogate
+                            }
+
+                            if (cp < 0x80) {
+                                out.push_back(static_cast<char>(cp));
+                            } else if (cp < 0x800) {
+                                out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+                                out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+                            } else if (cp < 0x10000) {
+                                out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+                                out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+                                out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+                            } else if (cp <= 0x10FFFF) {
+                                out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+                                out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+                                out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+                                out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
                             } else {
-                                out.push_back('?');
+                                return false;
                             }
                         } catch (...) {
                             return false;

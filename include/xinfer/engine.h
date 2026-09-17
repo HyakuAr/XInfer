@@ -16,7 +16,8 @@ struct ChatMessage {
 
 struct GenerationConfig {
     int     max_new_tokens{256};
-    float   temperature{0.0f};           // 0.0 = greedy argmax sampling
+    float   temperature{0.0f};           // 0.0 = greedy argmax sampling (currently only 0.0 supported)
+    float   top_p{1.0f};                 // 1.0 = full distribution (currently only 1.0 supported)
     int64_t eos_token_id{-1};            // Sentinel: default (-1) resolves dynamically to loaded model/tokenizer EOS (<|endoftext|>)
     int64_t im_end_token_id{-1};         // Sentinel: default (-1) resolves dynamically to loaded model/tokenizer IM_END (<|im_end|>)
     bool    apply_chat_template{true};

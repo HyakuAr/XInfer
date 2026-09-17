@@ -38,6 +38,7 @@ struct ChatCompletionRequest {
     std::vector<ChatMessage> messages;
     int max_tokens{256};
     float temperature{0.0f};
+    float top_p{1.0f};
     bool stream{false};
 };
 

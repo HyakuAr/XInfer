@@ -55,7 +55,8 @@ milestone's work early, even if it seems efficient. Do not silently expand a
   device ID `0xE211`) — one GPU, one process, one resident model.
 - **Target model:** `Qwen/Qwen3.8-27B`, quantized to INT4 (group size 64 or
   128), custom XMX-friendly layout.
-- **Concurrency:** startup-fixed, small (1–8 active requests). No dynamic
+- **Concurrency:** startup-fixed, small (1–8 active requests served via bounded
+  worker pool; single resident model forward passes serialized). No dynamic
   continuous batching, no multi-GPU, no weight offloading.
 - **Artifact format:** a single self-contained binary format (working name:
   `.xinfer`) analogous to ninfer's `.ninfer` — weights + tokenizer + chat

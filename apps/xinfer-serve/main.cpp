@@ -31,6 +31,7 @@ void print_usage(const char* prog) {
               << "  --model-id <name>    Model name in OpenAI responses (default: qwen3.8-27b)\n"
               << "  --chunk-size <int>   Chunk size for chunked prefill (default: 512)\n"
               << "  --max-seq-len <int>  Maximum context length for KV cache (default: 8192)\n"
+              << "  --workers <int>      Number of worker threads (1-8, default: 8)\n"
               << "  --help, -h           Show this help message\n"
               << std::endl;
 }
@@ -46,6 +47,7 @@ int main(int argc, char** argv) {
     std::string model_id = "qwen3.8-27b";
     int chunk_size = 512;
     int max_seq_len = 8192;
+    int workers = 8;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -61,6 +63,8 @@ int main(int argc, char** argv) {
             chunk_size = std::stoi(argv[++i]);
         } else if (arg == "--max-seq-len" && i + 1 < argc) {
             max_seq_len = std::stoi(argv[++i]);
+        } else if (arg == "--workers" && i + 1 < argc) {
+            workers = std::clamp(std::stoi(argv[++i]), 1, 8);
         } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             return 0;
@@ -108,6 +112,7 @@ int main(int argc, char** argv) {
     srv_cfg.host = host;
     srv_cfg.port = port;
     srv_cfg.model_id = model_id;
+    srv_cfg.num_workers = static_cast<size_t>(workers);
 
     xinfer::serve::HttpServer server(engine);
     try {
