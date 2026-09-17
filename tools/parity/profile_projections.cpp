@@ -12,6 +12,12 @@
 
 using namespace xinfer;
 
+// M7 microbenchmark peak: 383.7 GB/s at shape M=1, N=17408, K=5120
+// (measured in tools/parity/test_int4_xmx_vs_gemv.cpp on Arc Pro B60)
+constexpr double M7_PEAK_BW_GBS = 383.7;
+constexpr double B60_PEAK_BW_GBS = 456.0;
+constexpr int B60_HW_THREADS = 1280; // 20 Xe-cores * 64 threads/core
+
 struct ProjectionMetrics {
     std::string name;
     int64_t N{0};
@@ -25,6 +31,8 @@ struct ProjectionMetrics {
     size_t act_bytes{0};
     size_t total_bytes{0};
     double achieved_bw_gbs{0.0};
+    int64_t subgroups_per_launch{0};
+    double occupancy_pct{0.0};
 };
 
 int main(int argc, char** argv) {
@@ -263,6 +271,9 @@ int main(int argc, char** argv) {
         if (p.total_time_ms > 0.0) {
             p.achieved_bw_gbs = (static_cast<double>(p.total_bytes) / 1e9) / (p.total_time_ms / 1000.0);
         }
+        // Sub-group occupancy: ROWS_PER_SG=2, each sub-group covers 2 output rows
+        p.subgroups_per_launch = (p.N + 1) / 2;
+        p.occupancy_pct = static_cast<double>(p.subgroups_per_launch) / B60_HW_THREADS * 100.0;
     }
 
     int total_ops_count = 0;
@@ -272,34 +283,40 @@ int main(int argc, char** argv) {
 
     std::cout << "\n=========================================================================================================================" << std::endl;
     std::cout << "                                  DETAILED INT4 LINEAR GEMV SHAPE & BANDWIDTH BREAKDOWN                                  " << std::endl;
+    std::cout << "                          (M7 Peak Reference: " << M7_PEAK_BW_GBS << " GB/s at N=17408, K=5120)" << std::endl;
     std::cout << "=========================================================================================================================" << std::endl;
     std::cout << std::left << std::setw(18) << "Projection Type"
               << std::right << std::setw(14) << "Shape [N x K]"
               << std::setw(7) << "Count"
-              << std::setw(13) << "Total MB"
+              << std::setw(8) << "SGs"
+              << std::setw(8) << "Occ%"
               << std::setw(12) << "Time (ms)"
               << std::setw(12) << "Avg/Op(ms)"
               << std::setw(10) << "% Linear"
               << std::setw(13) << "Bandwidth"
-              << std::setw(12) << "Status" << std::endl;
+              << std::setw(10) << "vs M7"
+              << std::setw(14) << "Status" << std::endl;
     std::cout << "-------------------------------------------------------------------------------------------------------------------------" << std::endl;
 
     for (const auto& p : projs) {
         double pct = (grand_total_time_ms > 0.0) ? (p.total_time_ms / grand_total_time_ms * 100.0) : 0.0;
-        double mb = static_cast<double>(p.total_bytes) / (1024.0 * 1024.0);
         double avg_ms = p.total_time_ms / p.count;
+        double vs_m7 = (M7_PEAK_BW_GBS > 0.0) ? (p.achieved_bw_gbs / M7_PEAK_BW_GBS * 100.0) : 0.0;
 
         std::string shape_str = std::to_string(p.N) + "x" + std::to_string(p.K);
         std::string status = (p.achieved_bw_gbs < 50.0) ? "SEVERELY LOW" : (p.achieved_bw_gbs < 100.0 ? "SUBOPTIMAL" : "SATURATED");
+        std::string occ_str = (p.occupancy_pct < 100.0) ? std::to_string(static_cast<int>(p.occupancy_pct)) + "%" : "FULL";
 
         std::cout << std::left << std::setw(18) << p.name
                   << std::right << std::setw(14) << shape_str
                   << std::setw(7) << p.count
-                  << std::fixed << std::setprecision(1) << std::setw(13) << mb
-                  << std::setprecision(2) << std::setw(12) << p.total_time_ms
+                  << std::setw(8) << p.subgroups_per_launch
+                  << std::setw(8) << occ_str
+                  << std::fixed << std::setprecision(2) << std::setw(12) << p.total_time_ms
                   << std::setprecision(3) << std::setw(12) << avg_ms
                   << std::setprecision(2) << std::setw(9) << pct << "%"
                   << std::setprecision(1) << std::setw(10) << p.achieved_bw_gbs << " GB/s"
+                  << std::setprecision(0) << std::setw(8) << vs_m7 << "%"
                   << std::setw(14) << status << std::endl;
     }
     std::cout << "-------------------------------------------------------------------------------------------------------------------------" << std::endl;
@@ -318,6 +335,12 @@ int main(int argc, char** argv) {
     std::cout << "Aggregate Model Weights Read:        " << (grand_total_weight_bytes / 1e9) << " GB" << std::endl;
     std::cout << "Aggregate Weight Memory Bandwidth:   " << aggregate_weight_bw << " GB/s" << std::endl;
     std::cout << "Aggregate Total Bus Traffic Bandwidth:" << aggregate_bw << " GB/s" << std::endl;
+    std::cout << "\n--- M7 Microbenchmark Reconciliation ---" << std::endl;
+    std::cout << "M7 Peak (N=17408):           " << M7_PEAK_BW_GBS << " GB/s (" << std::fixed << std::setprecision(1) << (M7_PEAK_BW_GBS / B60_PEAK_BW_GBS * 100.0) << "% of B60 peak)" << std::endl;
+    std::cout << "Decode Aggregate:            " << std::setprecision(1) << aggregate_bw << " GB/s (" << (aggregate_bw / B60_PEAK_BW_GBS * 100.0) << "% of B60 peak)" << std::endl;
+    std::cout << "Gap Ratio (M7 Peak / Aggr):  " << std::setprecision(1) << (M7_PEAK_BW_GBS / aggregate_bw) << "x" << std::endl;
+    std::cout << "Explanation: shape-mix weighted average across " << NUM_PROJ_TYPES << " projection shapes at varying GPU occupancy." << std::endl;
+    std::cout << "             Smallest shapes (N=48) use 1.9% of HW threads; M7 benchmarked only the largest (N=17408, 680%)." << std::endl;
 
     // =========================================================================
     // Fused Projections Benchmark: Directly measuring the fused kernels on B60

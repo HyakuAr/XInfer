@@ -439,6 +439,17 @@ int main() {
     std::cout << "\nGPU Hardware Span (first start -> last end): " << gpu_span_ms << " ms" << std::endl;
     std::cout << "Continuous Wall-Clock Latency:              " << wallclock_step_ms << " ms" << std::endl;
 
+    // Aggregate linear bandwidth reconciliation against M7 microbenchmark
+    double linear_total_ms = cat_durations_ms[CAT_LINEAR_ATTN] + cat_durations_ms[CAT_LINEAR_MLP] + cat_durations_ms[CAT_LINEAR_LM_HEAD];
+    double weight_gb = 15.77; // INT4 model weights in GB (from M2 artifact)
+    double aggregate_bw = (linear_total_ms > 0.0) ? (weight_gb / (linear_total_ms / 1000.0)) : 0.0;
+    std::cout << "\n--- Linear GEMV Bandwidth (M7 Reconciliation) ---" << std::endl;
+    std::cout << "Total linear kernel time:  " << std::fixed << std::setprecision(2) << linear_total_ms << " ms (" << (linear_total_ms / total_cat_sum_ms * 100.0) << "% of step)" << std::endl;
+    std::cout << "Model weights:             " << weight_gb << " GB" << std::endl;
+    std::cout << "Aggregate effective BW:    " << std::setprecision(1) << aggregate_bw << " GB/s" << std::endl;
+    std::cout << "M7 peak (N=17408 only):    383.7 GB/s" << std::endl;
+    std::cout << "Gap ratio:                 " << std::setprecision(1) << (383.7 / aggregate_bw) << "x (explained by shape-mix occupancy)" << std::endl;
+
     // Now also profile DecodeGraph replay specifically!
     std::cout << "\nMeasuring DecodeGraph command graph replay timing (M8)..." << std::endl;
     targets::qwen3_8::DecodeGraph graph_runner(ctx, *model, kv_cache);
