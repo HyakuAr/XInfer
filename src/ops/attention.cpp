@@ -14,16 +14,19 @@
 
 namespace xinfer::ops {
 
-void sdpa_causal_naive(sycl::queue& q,
-                       float* out,
-                       const float* Q,
-                       const float* K,
-                       const float* V,
-                       int64_t seq_len,
-                       int64_t num_q_heads,
-                       int64_t num_kv_heads,
-                       int64_t head_dim,
-                       float scale) {
+namespace {
+
+template <typename QT, typename KT, typename VT, typename OutT>
+void sdpa_causal_naive_impl(sycl::queue& q,
+                            OutT* out,
+                            const QT* Q,
+                            const KT* K,
+                            const VT* V,
+                            int64_t seq_len,
+                            int64_t num_q_heads,
+                            int64_t num_kv_heads,
+                            int64_t head_dim,
+                            float scale) {
     if (seq_len <= 0 || num_q_heads <= 0 || num_kv_heads <= 0 || head_dim <= 0) return;
 
     if (scale <= 0.0f) {
@@ -32,29 +35,30 @@ void sdpa_causal_naive(sycl::queue& q,
 
     int64_t gqa_ratio = num_q_heads / num_kv_heads;
 
-    // Reference-only naive kernel (1 work-item per (seq_pos, q_head))
     q.parallel_for(sycl::range<2>(static_cast<size_t>(seq_len), static_cast<size_t>(num_q_heads)), [=](sycl::id<2> idx) {
         int64_t i = idx[0]; // Target token position
         int64_t h = idx[1]; // Query head index
 
         int64_t kv_h = h / gqa_ratio;
-        const float* q_vec = Q + (i * num_q_heads + h) * head_dim;
-        float* out_vec = out + (i * num_q_heads + h) * head_dim;
+        const QT* q_vec = Q + (i * num_q_heads + h) * head_dim;
+        OutT* out_vec = out + (i * num_q_heads + h) * head_dim;
 
         float max_score = -std::numeric_limits<float>::infinity();
         float sum_exp = 0.0f;
 
+        // Temporary float accumulation buffer in private memory (head_dim <= 256)
+        float acc[256];
         for (int64_t d = 0; d < head_dim; ++d) {
-            out_vec[d] = 0.0f;
+            acc[d] = 0.0f;
         }
 
         for (int64_t j = 0; j <= i; ++j) {
-            const float* k_vec = K + (j * num_kv_heads + kv_h) * head_dim;
-            const float* v_vec = V + (j * num_kv_heads + kv_h) * head_dim;
+            const KT* k_vec = K + (j * num_kv_heads + kv_h) * head_dim;
+            const VT* v_vec = V + (j * num_kv_heads + kv_h) * head_dim;
 
             float dot = 0.0f;
             for (int64_t d = 0; d < head_dim; ++d) {
-                dot += q_vec[d] * k_vec[d];
+                dot += static_cast<float>(q_vec[d]) * static_cast<float>(k_vec[d]);
             }
             float score = dot * scale;
 
@@ -64,28 +68,29 @@ void sdpa_causal_naive(sycl::queue& q,
 
             sum_exp = sum_exp * exp_old + exp_new;
             for (int64_t d = 0; d < head_dim; ++d) {
-                out_vec[d] = out_vec[d] * exp_old + exp_new * v_vec[d];
+                acc[d] = acc[d] * exp_old + exp_new * static_cast<float>(v_vec[d]);
             }
             max_score = new_max;
         }
 
         float inv_sum = 1.0f / (sum_exp > 0.0f ? sum_exp : 1.0f);
         for (int64_t d = 0; d < head_dim; ++d) {
-            out_vec[d] *= inv_sum;
+            out_vec[d] = static_cast<OutT>(acc[d] * inv_sum);
         }
     });
 }
 
-void attention_write_kv_cache(sycl::queue& q,
-                              sycl::half* k_cache,
-                              sycl::half* v_cache,
-                              const float* K_in,
-                              const float* V_in,
-                              int64_t start_pos,
-                              int64_t num_tokens,
-                              int64_t num_kv_heads,
-                              int64_t head_dim,
-                              int64_t max_seq_len) {
+template <typename T>
+void attention_write_kv_cache_impl(sycl::queue& q,
+                                   sycl::half* k_cache,
+                                   sycl::half* v_cache,
+                                   const T* K_in,
+                                   const T* V_in,
+                                   int64_t start_pos,
+                                   int64_t num_tokens,
+                                   int64_t num_kv_heads,
+                                   int64_t head_dim,
+                                   int64_t max_seq_len) {
     if (num_tokens <= 0 || num_kv_heads <= 0 || head_dim <= 0) return;
     if (max_seq_len > 0) {
         if (start_pos >= max_seq_len || start_pos < 0) return;
@@ -111,16 +116,17 @@ void attention_write_kv_cache(sycl::queue& q,
     });
 }
 
-sycl::event attention_write_kv_cache_dynamic(sycl::queue& q,
-                                       sycl::half* k_cache,
-                                       sycl::half* v_cache,
-                                       const float* K_in,
-                                       const float* V_in,
-                                       const int64_t* d_start_pos,
-                                       int64_t num_tokens,
-                                       int64_t num_kv_heads,
-                                       int64_t head_dim,
-                                       int64_t max_seq_len) {
+template <typename T>
+sycl::event attention_write_kv_cache_dynamic_impl(sycl::queue& q,
+                                                  sycl::half* k_cache,
+                                                  sycl::half* v_cache,
+                                                  const T* K_in,
+                                                  const T* V_in,
+                                                  const int64_t* d_start_pos,
+                                                  int64_t num_tokens,
+                                                  int64_t num_kv_heads,
+                                                  int64_t head_dim,
+                                                  int64_t max_seq_len) {
     if (num_tokens <= 0 || num_kv_heads <= 0 || head_dim <= 0) return sycl::event{};
     int64_t kv_stride = num_kv_heads * head_dim;
     size_t total_elements = static_cast<size_t>(num_tokens * kv_stride);
@@ -141,19 +147,19 @@ sycl::event attention_write_kv_cache_dynamic(sycl::queue& q,
     });
 }
 
-// Milestone 7 Hardware-Accelerated Sub-group Cooperative Attention
-void sdpa_causal_cached(sycl::queue& q,
-                        float* out,
-                        const float* Q,
-                        const sycl::half* k_cache,
-                        const sycl::half* v_cache,
-                        int64_t start_pos,
-                        int64_t num_q_tokens,
-                        int64_t num_q_heads,
-                        int64_t num_kv_heads,
-                        int64_t head_dim,
-                        float scale,
-                        int64_t max_seq_len) {
+template <typename QT, typename OutT>
+void sdpa_causal_cached_impl(sycl::queue& q,
+                             OutT* out,
+                             const QT* Q,
+                             const sycl::half* k_cache,
+                             const sycl::half* v_cache,
+                             int64_t start_pos,
+                             int64_t num_q_tokens,
+                             int64_t num_q_heads,
+                             int64_t num_kv_heads,
+                             int64_t head_dim,
+                             float scale,
+                             int64_t max_seq_len) {
     if (num_q_tokens <= 0 || num_q_heads <= 0 || num_kv_heads <= 0 || head_dim <= 0) return;
 
     if (scale <= 0.0f) {
@@ -169,7 +175,6 @@ void sdpa_causal_cached(sycl::queue& q,
     size_t global_threads = total_subgroups * SG_SIZE;
     size_t padded_global = ((global_threads + WG_SIZE - 1) / WG_SIZE) * WG_SIZE;
 
-    // For head_dim=256, each lane handles 16 elements
     size_t elems_per_lane = static_cast<size_t>(head_dim) / SG_SIZE;
 
     q.submit([&](sycl::handler& cgh) {
@@ -185,8 +190,8 @@ void sdpa_causal_cached(sycl::queue& q,
                 size_t lane = sg.get_local_linear_id();
 
                 int64_t kv_h = h / gqa_ratio;
-                const float* q_vec = Q + (i * num_q_heads + h) * head_dim;
-                float* out_vec = out + (i * num_q_heads + h) * head_dim;
+                const QT* q_vec = Q + (i * num_q_heads + h) * head_dim;
+                OutT* out_vec = out + (i * num_q_heads + h) * head_dim;
 
                 int64_t total_keys = start_pos + i + 1;
                 if (max_seq_len > 0 && total_keys > max_seq_len) {
@@ -201,7 +206,7 @@ void sdpa_causal_cached(sycl::queue& q,
                 float q_reg[16];
                 for (size_t d = 0; d < elems_per_lane; ++d) {
                     size_t idx = lane * elems_per_lane + d;
-                    q_reg[d] = q_vec[idx];
+                    q_reg[d] = static_cast<float>(q_vec[idx]);
                 }
 
                 // Accumulator in registers (up to 16 elements per lane for head_dim <= 256)
@@ -239,25 +244,25 @@ void sdpa_causal_cached(sycl::queue& q,
                 float inv_sum = 1.0f / (sum_exp > 0.0f ? sum_exp : 1.0f);
                 for (size_t d = 0; d < elems_per_lane; ++d) {
                     size_t idx = lane * elems_per_lane + d;
-                    out_vec[idx] = lane_out[d] * inv_sum;
+                    out_vec[idx] = static_cast<OutT>(lane_out[d] * inv_sum);
                 }
             });
     });
 }
 
-// Dynamic device-pointer overload for command-graph capture/replay
-sycl::event sdpa_causal_cached_dynamic(sycl::queue& q,
-                                 float* out,
-                                 const float* Q,
-                                 const sycl::half* k_cache,
-                                 const sycl::half* v_cache,
-                                 const int64_t* d_start_pos,
-                                 int64_t num_q_tokens,
-                                 int64_t num_q_heads,
-                                 int64_t num_kv_heads,
-                                 int64_t head_dim,
-                                 float scale,
-                                 int64_t max_seq_len) {
+template <typename QT, typename OutT>
+sycl::event sdpa_causal_cached_dynamic_impl(sycl::queue& q,
+                                            OutT* out,
+                                            const QT* Q,
+                                            const sycl::half* k_cache,
+                                            const sycl::half* v_cache,
+                                            const int64_t* d_start_pos,
+                                            int64_t num_q_tokens,
+                                            int64_t num_q_heads,
+                                            int64_t num_kv_heads,
+                                            int64_t head_dim,
+                                            float scale,
+                                            int64_t max_seq_len) {
     if (num_q_tokens <= 0 || num_q_heads <= 0 || num_kv_heads <= 0 || head_dim <= 0) return sycl::event{};
 
     if (scale <= 0.0f) {
@@ -288,8 +293,8 @@ sycl::event sdpa_causal_cached_dynamic(sycl::queue& q,
                 size_t lane = sg.get_local_linear_id();
 
                 int64_t kv_h = h / gqa_ratio;
-                const float* q_vec = Q + (i * num_q_heads + h) * head_dim;
-                float* out_vec = out + (i * num_q_heads + h) * head_dim;
+                const QT* q_vec = Q + (i * num_q_heads + h) * head_dim;
+                OutT* out_vec = out + (i * num_q_heads + h) * head_dim;
 
                 int64_t start_pos = *d_start_pos;
                 int64_t total_keys = start_pos + i + 1;
@@ -305,7 +310,7 @@ sycl::event sdpa_causal_cached_dynamic(sycl::queue& q,
                 float q_reg[16];
                 for (size_t d = 0; d < elems_per_lane; ++d) {
                     size_t idx = lane * elems_per_lane + d;
-                    q_reg[d] = q_vec[idx];
+                    q_reg[d] = static_cast<float>(q_vec[idx]);
                 }
 
                 float lane_out[16] = {0.0f};
@@ -338,10 +343,150 @@ sycl::event sdpa_causal_cached_dynamic(sycl::queue& q,
                 float inv_sum = 1.0f / (sum_exp > 0.0f ? sum_exp : 1.0f);
                 for (size_t d = 0; d < elems_per_lane; ++d) {
                     size_t idx = lane * elems_per_lane + d;
-                    out_vec[idx] = lane_out[d] * inv_sum;
+                    out_vec[idx] = static_cast<OutT>(lane_out[d] * inv_sum);
                 }
             });
     });
+}
+
+} // anonymous namespace
+
+void sdpa_causal_naive(sycl::queue& q,
+                       float* out,
+                       const float* Q,
+                       const float* K,
+                       const float* V,
+                       int64_t seq_len,
+                       int64_t num_q_heads,
+                       int64_t num_kv_heads,
+                       int64_t head_dim,
+                       float scale) {
+    sdpa_causal_naive_impl(q, out, Q, K, V, seq_len, num_q_heads, num_kv_heads, head_dim, scale);
+}
+
+void sdpa_causal_naive(sycl::queue& q,
+                       sycl::half* out,
+                       const sycl::half* Q,
+                       const sycl::half* K,
+                       const sycl::half* V,
+                       int64_t seq_len,
+                       int64_t num_q_heads,
+                       int64_t num_kv_heads,
+                       int64_t head_dim,
+                       float scale) {
+    sdpa_causal_naive_impl(q, out, Q, K, V, seq_len, num_q_heads, num_kv_heads, head_dim, scale);
+}
+
+void attention_write_kv_cache(sycl::queue& q,
+                              sycl::half* k_cache,
+                              sycl::half* v_cache,
+                              const float* K_in,
+                              const float* V_in,
+                              int64_t start_pos,
+                              int64_t num_tokens,
+                              int64_t num_kv_heads,
+                              int64_t head_dim,
+                              int64_t max_seq_len) {
+    attention_write_kv_cache_impl(q, k_cache, v_cache, K_in, V_in, start_pos, num_tokens, num_kv_heads, head_dim, max_seq_len);
+}
+
+void attention_write_kv_cache(sycl::queue& q,
+                              sycl::half* k_cache,
+                              sycl::half* v_cache,
+                              const sycl::half* K_in,
+                              const sycl::half* V_in,
+                              int64_t start_pos,
+                              int64_t num_tokens,
+                              int64_t num_kv_heads,
+                              int64_t head_dim,
+                              int64_t max_seq_len) {
+    attention_write_kv_cache_impl(q, k_cache, v_cache, K_in, V_in, start_pos, num_tokens, num_kv_heads, head_dim, max_seq_len);
+}
+
+sycl::event attention_write_kv_cache_dynamic(sycl::queue& q,
+                                       sycl::half* k_cache,
+                                       sycl::half* v_cache,
+                                       const float* K_in,
+                                       const float* V_in,
+                                       const int64_t* d_start_pos,
+                                       int64_t num_tokens,
+                                       int64_t num_kv_heads,
+                                       int64_t head_dim,
+                                       int64_t max_seq_len) {
+    return attention_write_kv_cache_dynamic_impl(q, k_cache, v_cache, K_in, V_in, d_start_pos, num_tokens, num_kv_heads, head_dim, max_seq_len);
+}
+
+sycl::event attention_write_kv_cache_dynamic(sycl::queue& q,
+                                       sycl::half* k_cache,
+                                       sycl::half* v_cache,
+                                       const sycl::half* K_in,
+                                       const sycl::half* V_in,
+                                       const int64_t* d_start_pos,
+                                       int64_t num_tokens,
+                                       int64_t num_kv_heads,
+                                       int64_t head_dim,
+                                       int64_t max_seq_len) {
+    return attention_write_kv_cache_dynamic_impl(q, k_cache, v_cache, K_in, V_in, d_start_pos, num_tokens, num_kv_heads, head_dim, max_seq_len);
+}
+
+void sdpa_causal_cached(sycl::queue& q,
+                        float* out,
+                        const float* Q,
+                        const sycl::half* k_cache,
+                        const sycl::half* v_cache,
+                        int64_t start_pos,
+                        int64_t num_q_tokens,
+                        int64_t num_q_heads,
+                        int64_t num_kv_heads,
+                        int64_t head_dim,
+                        float scale,
+                        int64_t max_seq_len) {
+    sdpa_causal_cached_impl(q, out, Q, k_cache, v_cache, start_pos, num_q_tokens, num_q_heads, num_kv_heads, head_dim, scale, max_seq_len);
+}
+
+void sdpa_causal_cached(sycl::queue& q,
+                        sycl::half* out,
+                        const sycl::half* Q,
+                        const sycl::half* k_cache,
+                        const sycl::half* v_cache,
+                        int64_t start_pos,
+                        int64_t num_q_tokens,
+                        int64_t num_q_heads,
+                        int64_t num_kv_heads,
+                        int64_t head_dim,
+                        float scale,
+                        int64_t max_seq_len) {
+    sdpa_causal_cached_impl(q, out, Q, k_cache, v_cache, start_pos, num_q_tokens, num_q_heads, num_kv_heads, head_dim, scale, max_seq_len);
+}
+
+sycl::event sdpa_causal_cached_dynamic(sycl::queue& q,
+                                 float* out,
+                                 const float* Q,
+                                 const sycl::half* k_cache,
+                                 const sycl::half* v_cache,
+                                 const int64_t* d_start_pos,
+                                 int64_t num_q_tokens,
+                                 int64_t num_q_heads,
+                                 int64_t num_kv_heads,
+                                 int64_t head_dim,
+                                 float scale,
+                                 int64_t max_seq_len) {
+    return sdpa_causal_cached_dynamic_impl(q, out, Q, k_cache, v_cache, d_start_pos, num_q_tokens, num_q_heads, num_kv_heads, head_dim, scale, max_seq_len);
+}
+
+sycl::event sdpa_causal_cached_dynamic(sycl::queue& q,
+                                 sycl::half* out,
+                                 const sycl::half* Q,
+                                 const sycl::half* k_cache,
+                                 const sycl::half* v_cache,
+                                 const int64_t* d_start_pos,
+                                 int64_t num_q_tokens,
+                                 int64_t num_q_heads,
+                                 int64_t num_kv_heads,
+                                 int64_t head_dim,
+                                 float scale,
+                                 int64_t max_seq_len) {
+    return sdpa_causal_cached_dynamic_impl(q, out, Q, k_cache, v_cache, d_start_pos, num_q_tokens, num_q_heads, num_kv_heads, head_dim, scale, max_seq_len);
 }
 
 } // namespace xinfer::ops

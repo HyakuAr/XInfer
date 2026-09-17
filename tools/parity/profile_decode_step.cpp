@@ -209,7 +209,7 @@ int main() {
 
         if (layer.layer_type == "full_attention") {
             // Full-Attention Fused Projections
-            ops::FusedProjectionDesc fa_projs[3] = {
+            ops::FusedProjectionDescFP32 fa_projs[3] = {
                 {act_q_gate, static_cast<const uint8_t*>(layer.q_proj.d_weights_int4),
                  static_cast<const sycl::half*>(layer.q_proj.d_scales), nullptr, cfg.full_q_gate_dim()},
                 {act_k, static_cast<const uint8_t*>(layer.k_proj.d_weights_int4),
@@ -289,7 +289,7 @@ int main() {
             full_idx++;
         } else {
             // Linear Attention Fused Projections
-            ops::FusedProjectionDesc la_projs[4] = {
+            ops::FusedProjectionDescFP32 la_projs[4] = {
                 {act_qkv_raw, static_cast<const uint8_t*>(layer.in_proj_qkv.d_weights_int4),
                  static_cast<const sycl::half*>(layer.in_proj_qkv.d_scales), nullptr, cfg.linear_conv_channels},
                 {act_z, static_cast<const uint8_t*>(layer.in_proj_z.d_weights_int4),

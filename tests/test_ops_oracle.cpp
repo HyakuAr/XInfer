@@ -480,7 +480,7 @@ void test_linear_oracle(DeviceContext& ctx) {
         std::vector<uint8_t*> d_fW(num_projs);
         std::vector<sycl::half*> d_fScales(num_projs);
         std::vector<float*> d_fY(num_projs);
-        FusedProjectionDesc descs[4];
+        FusedProjectionDescFP32 descs[4];
 
         for (int p = 0; p < num_projs; ++p) {
             int64_t n_val = fN[p];
@@ -615,6 +615,95 @@ void test_linear_oracle(DeviceContext& ctx) {
         ctx.free_device(d_mSg);
         ctx.free_device(d_mSu);
         ctx.free_device(d_mY);
+    }
+
+    // -------------------------------------------------------------------------
+    // Test FP16 Activation linear_int4 (FP16 in -> FP16 out, FP16 in -> FP32 out)
+    // -------------------------------------------------------------------------
+    std::cout << "  Testing linear_int4 with sycl::half activations..." << std::endl;
+    {
+        const int64_t hM = 1, hK = 512, hN = 256;
+        const int h_group_size = 128;
+        const int64_t h_num_groups = hK / h_group_size;
+
+        std::vector<sycl::half> h_hX(hM * hK);
+        std::vector<float> h_fX_ref(hM * hK);
+        for (int64_t i = 0; i < hM * hK; ++i) {
+            float v = dist(rng);
+            h_hX[i] = sycl::half(v);
+            h_fX_ref[i] = static_cast<float>(h_hX[i]);
+        }
+
+        std::vector<uint8_t> h_hW(hN * (hK / 2));
+        std::vector<sycl::half> h_hScales(hN * h_num_groups);
+        for (size_t i = 0; i < h_hScales.size(); ++i) {
+            h_hScales[i] = sycl::half(0.015f + static_cast<float>(i % 10) * 0.001f);
+        }
+        for (size_t i = 0; i < h_hW.size(); ++i) {
+            h_hW[i] = ((i + 2) & 0x0F) | (((i + 5) & 0x0F) << 4);
+        }
+
+        // CPU Oracle evaluation
+        std::vector<float> oracle_hY(hM * hN, 0.0f);
+        for (int64_t m = 0; m < hM; ++m) {
+            for (int64_t n = 0; n < hN; ++n) {
+                double acc = 0.0;
+                const float* rx = h_fX_ref.data() + m * hK;
+                const uint8_t* rw = h_hW.data() + n * (hK / 2);
+                const sycl::half* rs = h_hScales.data() + n * h_num_groups;
+                for (int64_t g = 0; g < h_num_groups; ++g) {
+                    float scale = static_cast<float>(rs[g]);
+                    int64_t base_k = g * h_group_size;
+                    int64_t base_byte = base_k / 2;
+                    for (int64_t b = 0; b < h_group_size / 2; ++b) {
+                        uint8_t byte_val = rw[base_byte + b];
+                        int8_t low = static_cast<int8_t>(byte_val & 0x0F);
+                        if (low >= 8) low = static_cast<int8_t>(low - 16);
+                        int8_t high = static_cast<int8_t>((byte_val >> 4) & 0x0F);
+                        if (high >= 8) high = static_cast<int8_t>(high - 16);
+                        acc += static_cast<double>(rx[base_k + 2 * b]) * (static_cast<double>(low) * static_cast<double>(scale));
+                        acc += static_cast<double>(rx[base_k + 2 * b + 1]) * (static_cast<double>(high) * static_cast<double>(scale));
+                    }
+                }
+                oracle_hY[m * hN + n] = static_cast<float>(acc);
+            }
+        }
+
+        sycl::half* d_hX = static_cast<sycl::half*>(ctx.allocate_device(hM * hK * sizeof(sycl::half)));
+        uint8_t* d_hW = static_cast<uint8_t*>(ctx.allocate_device(hN * (hK / 2)));
+        sycl::half* d_hScales = static_cast<sycl::half*>(ctx.allocate_device(hN * h_num_groups * sizeof(sycl::half)));
+        sycl::half* d_hY = static_cast<sycl::half*>(ctx.allocate_device(hM * hN * sizeof(sycl::half)));
+        float* d_fY_out = static_cast<float*>(ctx.allocate_device(hM * hN * sizeof(float)));
+
+        ctx.copy_host_to_device(d_hX, h_hX.data(), hM * hK * sizeof(sycl::half));
+        ctx.copy_host_to_device(d_hW, h_hW.data(), hN * (hK / 2));
+        ctx.copy_host_to_device(d_hScales, h_hScales.data(), hN * h_num_groups * sizeof(sycl::half));
+
+        // 1. FP16 in -> FP16 out
+        linear_int4(ctx.queue(), d_hY, d_hX, d_hW, d_hScales, nullptr, hM, hN, hK, h_group_size);
+        std::vector<sycl::half> gpu_hY(hM * hN);
+        ctx.copy_device_to_host(gpu_hY.data(), d_hY, hM * hN * sizeof(sycl::half));
+        std::vector<float> gpu_hY_float(hM * hN);
+        for (size_t i = 0; i < gpu_hY.size(); ++i) gpu_hY_float[i] = static_cast<float>(gpu_hY[i]);
+        DiffStats diff_fp16 = compare_buffers(oracle_hY.data(), gpu_hY_float.data(), hM * hN);
+        std::cout << "    FP16->FP16 Max Abs Diff: " << diff_fp16.max_abs << " | Mean Abs: " << diff_fp16.mean_abs << std::endl;
+        assert(diff_fp16.max_abs <= 5e-3f);
+
+        // 2. FP16 in -> FP32 out (LM Head logits)
+        linear_int4(ctx.queue(), d_fY_out, d_hX, d_hW, d_hScales, nullptr, hM, hN, hK, h_group_size);
+        std::vector<float> gpu_fY(hM * hN);
+        ctx.copy_device_to_host(gpu_fY.data(), d_fY_out, hM * hN * sizeof(float));
+        DiffStats diff_fp32out = compare_buffers(oracle_hY.data(), gpu_fY.data(), hM * hN);
+        std::cout << "    FP16->FP32 Max Abs Diff: " << diff_fp32out.max_abs << " | Mean Abs: " << diff_fp32out.mean_abs << std::endl;
+        assert(diff_fp32out.max_abs <= 1e-4f);
+
+        std::cout << "  -> PASSED: linear_int4 with sycl::half activations verified." << std::endl;
+
+        ctx.free_device(d_hX);
+        ctx.free_device(d_hW);
+        ctx.free_device(d_hScales);
+        ctx.free_device(d_hY);
+        ctx.free_device(d_fY_out);
     }
 }
 

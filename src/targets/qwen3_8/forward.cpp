@@ -12,12 +12,13 @@
 
 namespace xinfer::targets::qwen3_8 {
 
-sycl::event embed_tokens_lookup(sycl::queue& q,
-                                 float* out_act,
-                                 const void* embed_table_bf16,
-                                 const int64_t* d_token_ids,
-                                 int64_t num_tokens,
-                                 int64_t hidden_size) {
+template <typename OutT>
+sycl::event embed_tokens_lookup_impl(sycl::queue& q,
+                                      OutT* out_act,
+                                      const void* embed_table_bf16,
+                                      const int64_t* d_token_ids,
+                                      int64_t num_tokens,
+                                      int64_t hidden_size) {
     const uint16_t* table = static_cast<const uint16_t*>(embed_table_bf16);
 
     return q.parallel_for(sycl::range<2>(num_tokens, hidden_size), [=](sycl::id<2> idx) {
@@ -29,8 +30,26 @@ sycl::event embed_tokens_lookup(sycl::queue& q,
         uint32_t fp32_bits = static_cast<uint32_t>(bf16_val) << 16;
         float val;
         __builtin_memcpy(&val, &fp32_bits, sizeof(float));
-        out_act[t * hidden_size + d] = val;
+        out_act[t * hidden_size + d] = static_cast<OutT>(val);
     });
+}
+
+sycl::event embed_tokens_lookup(sycl::queue& q,
+                                 sycl::half* out_act,
+                                 const void* embed_table_bf16,
+                                 const int64_t* d_token_ids,
+                                 int64_t num_tokens,
+                                 int64_t hidden_size) {
+    return embed_tokens_lookup_impl<sycl::half>(q, out_act, embed_table_bf16, d_token_ids, num_tokens, hidden_size);
+}
+
+sycl::event embed_tokens_lookup(sycl::queue& q,
+                                 float* out_act,
+                                 const void* embed_table_bf16,
+                                 const int64_t* d_token_ids,
+                                 int64_t num_tokens,
+                                 int64_t hidden_size) {
+    return embed_tokens_lookup_impl<float>(q, out_act, embed_table_bf16, d_token_ids, num_tokens, hidden_size);
 }
 
 void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
@@ -63,32 +82,32 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
     for (int64_t i = 0; i < seq_len; ++i) host_pos[i] = start_pos + i;
     ctx->copy_host_to_device(d_positions, host_pos.data(), seq_len * sizeof(int64_t), true);
 
-    // Common activation buffers
+    // Common activation buffers (FP16 / sycl::half for 2x GDDR6 bandwidth efficiency)
     const auto& cfg = model.config();
     const int64_t hidden_size = cfg.hidden_size;
     const int64_t intermediate_size = cfg.intermediate_size;
 
-    float* act_x = static_cast<float*>(arena.allocate(seq_len * hidden_size * sizeof(float)));
-    float* act_normed = static_cast<float*>(arena.allocate(seq_len * hidden_size * sizeof(float)));
-    float* act_proj_out = static_cast<float*>(arena.allocate(seq_len * hidden_size * sizeof(float)));
+    sycl::half* act_x = static_cast<sycl::half*>(arena.allocate(seq_len * hidden_size * sizeof(sycl::half)));
+    sycl::half* act_normed = static_cast<sycl::half*>(arena.allocate(seq_len * hidden_size * sizeof(sycl::half)));
+    sycl::half* act_proj_out = static_cast<sycl::half*>(arena.allocate(seq_len * hidden_size * sizeof(sycl::half)));
 
     // MLP buffers (act_mlp_gate holds both gate/up fused SwiGLU activation directly)
-    float* act_mlp_gate = static_cast<float*>(arena.allocate(seq_len * intermediate_size * sizeof(float)));
+    sycl::half* act_mlp_gate = static_cast<sycl::half*>(arena.allocate(seq_len * intermediate_size * sizeof(sycl::half)));
 
     // Full Attention buffers
-    float* act_q_gate   = static_cast<float*>(arena.allocate(seq_len * cfg.full_q_gate_dim() * sizeof(float)));
-    float* act_q        = static_cast<float*>(arena.allocate(seq_len * cfg.full_q_dim() * sizeof(float)));
-    float* act_k        = static_cast<float*>(arena.allocate(seq_len * cfg.full_k_dim() * sizeof(float)));
-    float* act_v        = static_cast<float*>(arena.allocate(seq_len * cfg.full_v_dim() * sizeof(float)));
-    float* act_attn_out = static_cast<float*>(arena.allocate(seq_len * cfg.full_out_dim() * sizeof(float)));
+    sycl::half* act_q_gate   = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_q_gate_dim() * sizeof(sycl::half)));
+    sycl::half* act_q        = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_q_dim() * sizeof(sycl::half)));
+    sycl::half* act_k        = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_k_dim() * sizeof(sycl::half)));
+    sycl::half* act_v        = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_v_dim() * sizeof(sycl::half)));
+    sycl::half* act_attn_out = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_out_dim() * sizeof(sycl::half)));
 
     // Linear Attention buffers
-    float* act_qkv_raw   = static_cast<float*>(arena.allocate(seq_len * cfg.linear_conv_channels * sizeof(float)));
-    float* act_qkv_conv  = static_cast<float*>(arena.allocate(seq_len * cfg.linear_conv_channels * sizeof(float)));
-    float* act_z         = static_cast<float*>(arena.allocate(seq_len * cfg.linear_z_dim * sizeof(float)));
-    float* act_b         = static_cast<float*>(arena.allocate(seq_len * cfg.linear_b_dim * sizeof(float)));
-    float* act_a         = static_cast<float*>(arena.allocate(seq_len * cfg.linear_a_dim * sizeof(float)));
-    float* act_delta_out = static_cast<float*>(arena.allocate(seq_len * cfg.linear_z_dim * sizeof(float)));
+    sycl::half* act_qkv_raw   = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_conv_channels * sizeof(sycl::half)));
+    sycl::half* act_qkv_conv  = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_conv_channels * sizeof(sycl::half)));
+    sycl::half* act_z         = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_z_dim * sizeof(sycl::half)));
+    sycl::half* act_b         = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_b_dim * sizeof(sycl::half)));
+    sycl::half* act_a         = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_a_dim * sizeof(sycl::half)));
+    sycl::half* act_delta_out = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_z_dim * sizeof(sycl::half)));
 
     // 1. Initial embedding lookup
     embed_tokens_lookup(q, act_x, model.d_embed_tokens(), d_token_ids, seq_len, hidden_size);
@@ -163,17 +182,18 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
                 int64_t t = idx[0];
                 int64_t h = idx[1];
                 for (int d = 0; d < head_dim; ++d) {
-                    float gate_val = act_q_gate[t * q_gate_dim + h * 2 * head_dim + head_dim + d];
+                    float gate_val = static_cast<float>(act_q_gate[t * q_gate_dim + h * 2 * head_dim + head_dim + d]);
                     float sig = 1.0f / (1.0f + sycl::exp(-gate_val));
-                    act_attn_out[(t * num_q_heads + h) * head_dim + d] *= sig;
+                    float cur_val = static_cast<float>(act_attn_out[(t * num_q_heads + h) * head_dim + d]);
+                    act_attn_out[(t * num_q_heads + h) * head_dim + d] = static_cast<sycl::half>(cur_val * sig);
                 }
             });
 
             // Out projection
             ops::linear_int4(q, act_proj_out, act_attn_out,
-                                   static_cast<const uint8_t*>(layer.o_proj.d_weights_int4),
-                                   static_cast<const sycl::half*>(layer.o_proj.d_scales),
-                                   nullptr, seq_len, hidden_size, cfg.full_out_dim());
+                             static_cast<const uint8_t*>(layer.o_proj.d_weights_int4),
+                             static_cast<const sycl::half*>(layer.o_proj.d_scales),
+                             nullptr, seq_len, hidden_size, cfg.full_out_dim());
             full_idx++;
         } else {
             // Linear attention:
@@ -201,9 +221,9 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
 
             // Out projection
             ops::linear_int4(q, act_proj_out, act_delta_out,
-                                   static_cast<const uint8_t*>(layer.out_proj.d_weights_int4),
-                                   static_cast<const sycl::half*>(layer.out_proj.d_scales),
-                                   nullptr, seq_len, hidden_size, cfg.linear_z_dim);
+                             static_cast<const uint8_t*>(layer.out_proj.d_weights_int4),
+                             static_cast<const sycl::half*>(layer.out_proj.d_scales),
+                             nullptr, seq_len, hidden_size, cfg.linear_z_dim);
             linear_idx++;
         }
 
@@ -223,9 +243,9 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
 
         // Down projection
         ops::linear_int4(q, act_proj_out, act_mlp_gate,
-                               static_cast<const uint8_t*>(layer.down_proj.d_weights_int4),
-                               static_cast<const sycl::half*>(layer.down_proj.d_scales),
-                               nullptr, seq_len, hidden_size, intermediate_size);
+                         static_cast<const uint8_t*>(layer.down_proj.d_weights_int4),
+                         static_cast<const sycl::half*>(layer.down_proj.d_scales),
+                         nullptr, seq_len, hidden_size, intermediate_size);
 
         // Residual connection: act_x += act_proj_out
         ops::add_inplace(q, act_x, act_proj_out, seq_len * hidden_size);
@@ -233,14 +253,14 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
 
     // 3. Optional LM Head projection for the last token in chunk
     if (out_last_token_logits) {
-        float* last_x = act_x + (seq_len - 1) * hidden_size;
+        sycl::half* last_x = act_x + (seq_len - 1) * hidden_size;
         ops::rmsnorm(q, act_normed, last_x, model.d_final_norm(), 1, hidden_size);
 
         const auto& lm_head = model.lm_head();
         ops::linear_int4(q, out_last_token_logits, act_normed,
-                               static_cast<const uint8_t*>(lm_head.d_weights_int4),
-                               static_cast<const sycl::half*>(lm_head.d_scales),
-                               nullptr, 1, cfg.vocab_size, hidden_size);
+                         static_cast<const uint8_t*>(lm_head.d_weights_int4),
+                         static_cast<const sycl::half*>(lm_head.d_scales),
+                         nullptr, 1, cfg.vocab_size, hidden_size);
     }
 }
 

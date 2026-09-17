@@ -1,15 +1,24 @@
+// Citing vendor documentation per AGENTS.md §5:
+// - docs/vendor/xe-gpu-architecture.md (lines 48-50):
+//   Vector Engine (VE) ALUs support native FP16 and FP32 operations.
+// - docs/vendor/thread-mapping-occupancy.md (lines 9-15):
+//   Sub-group size 16 maps to one Vector Engine hardware thread. sycl::reqd_sub_group_size(16).
+
 #include "rmsnorm.h"
 #include <cmath>
 
 namespace xinfer::ops {
 
-sycl::event rmsnorm(sycl::queue& q,
-                    float* out,
-                    const float* in,
-                    const float* weight,
-                    int64_t num_tokens,
-                    int64_t hidden_size,
-                    float eps) {
+namespace {
+
+template <typename T>
+sycl::event rmsnorm_impl(sycl::queue& q,
+                         T* out,
+                         const T* in,
+                         const float* weight,
+                         int64_t num_tokens,
+                         int64_t hidden_size,
+                         float eps) {
     if (num_tokens <= 0 || hidden_size <= 0) return sycl::event{};
 
     constexpr size_t SG_SIZE = 16;
@@ -30,13 +39,13 @@ sycl::event rmsnorm(sycl::queue& q,
                 sycl::sub_group sg = item.get_sub_group();
                 size_t sg_id = sg.get_group_linear_id();
 
-                const float* x = in + t * hidden_size;
-                float* y = out + t * hidden_size;
+                const T* x = in + t * hidden_size;
+                T* y = out + t * hidden_size;
 
-                // 1. Cooperative strided sum of squares
+                // 1. Cooperative strided sum of squares (FP32 accumulation)
                 float local_sum_sq = 0.0f;
                 for (int64_t i = static_cast<int64_t>(tid); i < hidden_size; i += static_cast<int64_t>(WG_SIZE)) {
-                    float val = x[i];
+                    float val = static_cast<float>(x[i]);
                     local_sum_sq += val * val;
                 }
 
@@ -65,20 +74,22 @@ sycl::event rmsnorm(sycl::queue& q,
 
                 // 4. Normalized store
                 for (int64_t i = static_cast<int64_t>(tid); i < hidden_size; i += static_cast<int64_t>(WG_SIZE)) {
-                    y[i] = x[i] * rsqrt_val * weight[i];
+                    float val = static_cast<float>(x[i]);
+                    y[i] = static_cast<T>(val * rsqrt_val * weight[i]);
                 }
             });
     });
 }
 
-sycl::event rmsnorm_residual(sycl::queue& q,
-                             float* out,
-                             float* residual,
-                             const float* in,
-                             const float* weight,
-                             int64_t num_tokens,
-                             int64_t hidden_size,
-                             float eps) {
+template <typename T>
+sycl::event rmsnorm_residual_impl(sycl::queue& q,
+                                  T* out,
+                                  T* residual,
+                                  const T* in,
+                                  const float* weight,
+                                  int64_t num_tokens,
+                                  int64_t hidden_size,
+                                  float eps) {
     if (num_tokens <= 0 || hidden_size <= 0) return sycl::event{};
 
     constexpr size_t SG_SIZE = 16;
@@ -99,15 +110,15 @@ sycl::event rmsnorm_residual(sycl::queue& q,
                 sycl::sub_group sg = item.get_sub_group();
                 size_t sg_id = sg.get_group_linear_id();
 
-                const float* x = in + t * hidden_size;
-                float* res = residual + t * hidden_size;
-                float* y = out + t * hidden_size;
+                const T* x = in + t * hidden_size;
+                T* res = residual + t * hidden_size;
+                T* y = out + t * hidden_size;
 
                 float local_sum_sq = 0.0f;
                 for (int64_t i = static_cast<int64_t>(tid); i < hidden_size; i += static_cast<int64_t>(WG_SIZE)) {
-                    res[i] += x[i];
-                    float val = res[i];
-                    local_sum_sq += val * val;
+                    float r = static_cast<float>(res[i]) + static_cast<float>(x[i]);
+                    res[i] = static_cast<T>(r);
+                    local_sum_sq += r * r;
                 }
 
                 float sg_sum = sycl::reduce_over_group(sg, local_sum_sq, sycl::plus<float>());
@@ -132,10 +143,55 @@ sycl::event rmsnorm_residual(sycl::queue& q,
                 float rsqrt_val = slm_rsqrt[0];
 
                 for (int64_t i = static_cast<int64_t>(tid); i < hidden_size; i += static_cast<int64_t>(WG_SIZE)) {
-                    y[i] = res[i] * rsqrt_val * weight[i];
+                    float r = static_cast<float>(res[i]);
+                    y[i] = static_cast<T>(r * rsqrt_val * weight[i]);
                 }
             });
     });
+}
+
+} // anonymous namespace
+
+sycl::event rmsnorm(sycl::queue& q,
+                    float* out,
+                    const float* in,
+                    const float* weight,
+                    int64_t num_tokens,
+                    int64_t hidden_size,
+                    float eps) {
+    return rmsnorm_impl<float>(q, out, in, weight, num_tokens, hidden_size, eps);
+}
+
+sycl::event rmsnorm(sycl::queue& q,
+                    sycl::half* out,
+                    const sycl::half* in,
+                    const float* weight,
+                    int64_t num_tokens,
+                    int64_t hidden_size,
+                    float eps) {
+    return rmsnorm_impl<sycl::half>(q, out, in, weight, num_tokens, hidden_size, eps);
+}
+
+sycl::event rmsnorm_residual(sycl::queue& q,
+                             float* out,
+                             float* residual,
+                             const float* in,
+                             const float* weight,
+                             int64_t num_tokens,
+                             int64_t hidden_size,
+                             float eps) {
+    return rmsnorm_residual_impl<float>(q, out, residual, in, weight, num_tokens, hidden_size, eps);
+}
+
+sycl::event rmsnorm_residual(sycl::queue& q,
+                             sycl::half* out,
+                             sycl::half* residual,
+                             const sycl::half* in,
+                             const float* weight,
+                             int64_t num_tokens,
+                             int64_t hidden_size,
+                             float eps) {
+    return rmsnorm_residual_impl<sycl::half>(q, out, residual, in, weight, num_tokens, hidden_size, eps);
 }
 
 } // namespace xinfer::ops

@@ -11,6 +11,13 @@ namespace xinfer::targets::qwen3_8 {
 // out_qkv: [seq_len, 10240]
 // conv_state: optional [3, 10240] past timesteps buffer (if nullptr, assumes zeros for past)
 sycl::event causal_conv1d_silu(sycl::queue& q,
+                               sycl::half* out_qkv,
+                               const sycl::half* in_qkv,
+                               const float* conv_w,
+                               int64_t seq_len,
+                               float* conv_state = nullptr);
+
+sycl::event causal_conv1d_silu(sycl::queue& q,
                                float* out_qkv,
                                const float* in_qkv,
                                const float* conv_w,
@@ -28,6 +35,19 @@ sycl::event causal_conv1d_silu(sycl::queue& q,
 // out: [seq_len, 6144]
 // state_buffer: [48, 128, 128] state buffer
 // zero_state: if true, zeroes state_buffer before processing (e.g. at start of prompt)
+sycl::event recurrent_gated_delta_net(sycl::queue& q,
+                                      sycl::half* out,
+                                      const sycl::half* qkv,
+                                      const sycl::half* z,
+                                      const sycl::half* b,
+                                      const sycl::half* a,
+                                      const float* A_log,
+                                      const float* dt_bias,
+                                      const float* norm_weight,
+                                      float* state_buffer,
+                                      int64_t seq_len,
+                                      bool zero_state = false);
+
 sycl::event recurrent_gated_delta_net(sycl::queue& q,
                                       float* out,
                                       const float* qkv,

@@ -43,23 +43,23 @@ DecodeGraph::DecodeGraph(std::shared_ptr<core::DeviceContext> ctx,
     d_positions_ = sycl::malloc_device<int64_t>(1, q);
     d_logits_    = sycl::malloc_device<float>(vocab_size, q);
 
-    act_x_        = sycl::malloc_device<float>(hidden_size, q);
-    act_normed_   = sycl::malloc_device<float>(hidden_size, q);
-    act_proj_out_ = sycl::malloc_device<float>(hidden_size, q);
-    act_mlp_gate_ = sycl::malloc_device<float>(intermediate_size, q);
+    act_x_        = sycl::malloc_device<sycl::half>(hidden_size, q);
+    act_normed_   = sycl::malloc_device<sycl::half>(hidden_size, q);
+    act_proj_out_ = sycl::malloc_device<sycl::half>(hidden_size, q);
+    act_mlp_gate_ = sycl::malloc_device<sycl::half>(intermediate_size, q);
 
-    act_q_gate_   = sycl::malloc_device<float>(cfg.full_q_gate_dim(), q);
-    act_q_        = sycl::malloc_device<float>(cfg.full_q_dim(), q);
-    act_k_        = sycl::malloc_device<float>(cfg.full_k_dim(), q);
-    act_v_        = sycl::malloc_device<float>(cfg.full_v_dim(), q);
-    act_attn_out_ = sycl::malloc_device<float>(cfg.full_out_dim(), q);
+    act_q_gate_   = sycl::malloc_device<sycl::half>(cfg.full_q_gate_dim(), q);
+    act_q_        = sycl::malloc_device<sycl::half>(cfg.full_q_dim(), q);
+    act_k_        = sycl::malloc_device<sycl::half>(cfg.full_k_dim(), q);
+    act_v_        = sycl::malloc_device<sycl::half>(cfg.full_v_dim(), q);
+    act_attn_out_ = sycl::malloc_device<sycl::half>(cfg.full_out_dim(), q);
 
-    act_qkv_raw_   = sycl::malloc_device<float>(cfg.linear_conv_channels, q);
-    act_qkv_conv_  = sycl::malloc_device<float>(cfg.linear_conv_channels, q);
-    act_z_         = sycl::malloc_device<float>(cfg.linear_z_dim, q);
-    act_b_         = sycl::malloc_device<float>(cfg.linear_b_dim, q);
-    act_a_         = sycl::malloc_device<float>(cfg.linear_a_dim, q);
-    act_delta_out_ = sycl::malloc_device<float>(cfg.linear_z_dim, q);
+    act_qkv_raw_   = sycl::malloc_device<sycl::half>(cfg.linear_conv_channels, q);
+    act_qkv_conv_  = sycl::malloc_device<sycl::half>(cfg.linear_conv_channels, q);
+    act_z_         = sycl::malloc_device<sycl::half>(cfg.linear_z_dim, q);
+    act_b_         = sycl::malloc_device<sycl::half>(cfg.linear_b_dim, q);
+    act_a_         = sycl::malloc_device<sycl::half>(cfg.linear_a_dim, q);
+    act_delta_out_ = sycl::malloc_device<sycl::half>(cfg.linear_z_dim, q);
 }
 
 DecodeGraph::~DecodeGraph() {
@@ -137,9 +137,9 @@ bool DecodeGraph::capture() {
                 };
                 ops::linear_int4_fused(q, act_normed_, fa_projs, 3, 1, hidden_size);
 
-                float* q_ptr = act_q_;
-                float* q_gate_ptr = act_q_gate_;
-                float* attn_out_ptr = act_attn_out_;
+                sycl::half* q_ptr = act_q_;
+                sycl::half* q_gate_ptr = act_q_gate_;
+                sycl::half* attn_out_ptr = act_attn_out_;
                 int64_t num_q_heads = cfg.num_attention_heads;
                 int64_t head_dim = cfg.head_dim;
                 int64_t q_gate_dim = cfg.full_q_gate_dim();
@@ -183,9 +183,10 @@ bool DecodeGraph::capture() {
                     int64_t t = idx[0];
                     int64_t h = idx[1];
                     for (int d = 0; d < head_dim; ++d) {
-                        float gate_val = q_gate_ptr[t * q_gate_dim + h * 2 * head_dim + head_dim + d];
+                        float gate_val = static_cast<float>(q_gate_ptr[t * q_gate_dim + h * 2 * head_dim + head_dim + d]);
                         float sig = 1.0f / (1.0f + sycl::exp(-gate_val));
-                        attn_out_ptr[(t * num_q_heads + h) * head_dim + d] *= sig;
+                        float cur_val = static_cast<float>(attn_out_ptr[(t * num_q_heads + h) * head_dim + d]);
+                        attn_out_ptr[(t * num_q_heads + h) * head_dim + d] = static_cast<sycl::half>(cur_val * sig);
                     }
                 });
 

@@ -44,24 +44,24 @@ private:
     int64_t* d_positions_{nullptr};
     float*   d_logits_{nullptr};
 
-    // Fixed activation buffers
-    float* act_x_{nullptr};
-    float* act_normed_{nullptr};
-    float* act_proj_out_{nullptr};
-    float* act_mlp_gate_{nullptr};
+    // Fixed activation buffers (FP16 / sycl::half)
+    sycl::half* act_x_{nullptr};
+    sycl::half* act_normed_{nullptr};
+    sycl::half* act_proj_out_{nullptr};
+    sycl::half* act_mlp_gate_{nullptr};
 
-    float* act_q_gate_{nullptr};
-    float* act_q_{nullptr};
-    float* act_k_{nullptr};
-    float* act_v_{nullptr};
-    float* act_attn_out_{nullptr};
+    sycl::half* act_q_gate_{nullptr};
+    sycl::half* act_q_{nullptr};
+    sycl::half* act_k_{nullptr};
+    sycl::half* act_v_{nullptr};
+    sycl::half* act_attn_out_{nullptr};
 
-    float* act_qkv_raw_{nullptr};
-    float* act_qkv_conv_{nullptr};
-    float* act_z_{nullptr};
-    float* act_b_{nullptr};
-    float* act_a_{nullptr};
-    float* act_delta_out_{nullptr};
+    sycl::half* act_qkv_raw_{nullptr};
+    sycl::half* act_qkv_conv_{nullptr};
+    sycl::half* act_z_{nullptr};
+    sycl::half* act_b_{nullptr};
+    sycl::half* act_a_{nullptr};
+    sycl::half* act_delta_out_{nullptr};
 
     // Compiled executable graph handle
     std::unique_ptr<sycl::ext::oneapi::experimental::command_graph<

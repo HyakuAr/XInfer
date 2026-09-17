@@ -21,4 +21,15 @@ sycl::event rope(sycl::queue& q,
                  float theta = 10000000.0f,
                  int64_t rotary_dim = 64);
 
+sycl::event rope(sycl::queue& q,
+                 sycl::half* q_ptr,
+                 sycl::half* k_ptr,
+                 int64_t num_tokens,
+                 int64_t num_q_heads,
+                 int64_t num_kv_heads,
+                 int64_t head_dim,
+                 const int64_t* positions,
+                 float theta = 10000000.0f,
+                 int64_t rotary_dim = 64);
+
 } // namespace xinfer::ops

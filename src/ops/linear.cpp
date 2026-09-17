@@ -4,9 +4,10 @@
 //   M=1 decode is memory bandwidth-bound (4 FLOP/byte).
 //   Vector Engine SIMD16 cooperative GEMV achieves 383.7 GB/s (84% peak bandwidth);
 //   INT4-unpack-to-SLM + XMX Joint Matrix is 7.5x slower (0.902 ms vs 0.120 ms).
-// - docs/vendor/xe-gpu-architecture.md (lines 22-39):
+// - docs/vendor/xe-gpu-architecture.md (lines 22-50):
 //   Intel Arc Pro B60: 20 Xe-cores, 8 Vector Engines per core, 8 HW threads per VE
 //   = 64 HW threads per core (1280 total). Sub-group size: 16, 32.
+//   Vector Engine SIMD ALUs support native FP16 and FP32.
 // - docs/vendor/thread-mapping-occupancy.md (lines 9-15):
 //   Sub-group size 16 maps to one Vector Engine hardware thread; work-group to Xe-core.
 //   sycl::reqd_sub_group_size(16).
@@ -21,16 +22,17 @@ namespace xinfer::ops {
 // Vector Engine INT4 GEMV Kernel (Milestone 7 / M10 Production Path)
 // =============================================================================
 
-sycl::event linear_int4(sycl::queue& q,
-                  float* Y,
-                  const float* X,
-                  const uint8_t* W_int4,
-                  const sycl::half* scales,
-                  const float* bias,
-                  int64_t M,
-                  int64_t N,
-                  int64_t K,
-                  int group_size) {
+template <typename InT, typename OutT>
+sycl::event linear_int4_impl(sycl::queue& q,
+                             OutT* Y,
+                             const InT* X,
+                             const uint8_t* W_int4,
+                             const sycl::half* scales,
+                             const float* bias,
+                             int64_t M,
+                             int64_t N,
+                             int64_t K,
+                             int group_size) {
     if (M <= 0 || N <= 0 || K <= 0) return sycl::event{};
     int64_t num_groups = K / group_size;
 
@@ -63,7 +65,7 @@ sycl::event linear_int4(sycl::queue& q,
                 int64_t n1 = n0 + 1;
                 size_t lane = sg.get_local_linear_id(); // 0..15
 
-                const float* row_x = X + m * K;
+                const InT* row_x = X + m * K;
                 const uint8_t* row_w0 = W_int4 + n0 * (K / 2);
                 const uint8_t* row_w1 = (n1 < N) ? (W_int4 + n1 * (K / 2)) : nullptr;
                 const sycl::half* scales0 = scales + n0 * num_groups;
@@ -77,15 +79,15 @@ sycl::event linear_int4(sycl::queue& q,
                     int64_t base_byte = base_k / 2;
                     int64_t k_offset = base_k + lane * 8;
 
-                    // Load 8 contiguous activation floats into registers once
-                    float x0 = row_x[k_offset + 0];
-                    float x1 = row_x[k_offset + 1];
-                    float x2 = row_x[k_offset + 2];
-                    float x3 = row_x[k_offset + 3];
-                    float x4 = row_x[k_offset + 4];
-                    float x5 = row_x[k_offset + 5];
-                    float x6 = row_x[k_offset + 6];
-                    float x7 = row_x[k_offset + 7];
+                    // Load 8 contiguous activation values into registers once
+                    float x0 = static_cast<float>(row_x[k_offset + 0]);
+                    float x1 = static_cast<float>(row_x[k_offset + 1]);
+                    float x2 = static_cast<float>(row_x[k_offset + 2]);
+                    float x3 = static_cast<float>(row_x[k_offset + 3]);
+                    float x4 = static_cast<float>(row_x[k_offset + 4]);
+                    float x5 = static_cast<float>(row_x[k_offset + 5]);
+                    float x6 = static_cast<float>(row_x[k_offset + 6]);
+                    float x7 = static_cast<float>(row_x[k_offset + 7]);
 
                     // Row 0
                     float scale0 = static_cast<float>(scales0[g]);
@@ -126,28 +128,71 @@ sycl::event linear_int4(sycl::queue& q,
                 float total0 = sycl::reduce_over_group(sg, lane_acc0, sycl::plus<float>());
                 if (lane == 0) {
                     if (bias) total0 += bias[n0];
-                    Y[m * N + n0] = total0;
+                    Y[m * N + n0] = static_cast<OutT>(total0);
                 }
 
                 if (row_w1) {
                     float total1 = sycl::reduce_over_group(sg, lane_acc1, sycl::plus<float>());
                     if (lane == 0) {
                         if (bias) total1 += bias[n1];
-                        Y[m * N + n1] = total1;
+                        Y[m * N + n1] = static_cast<OutT>(total1);
                     }
                 }
             });
     });
 }
 
+// FP16 in -> FP16 out (Intermediate layer projections)
+sycl::event linear_int4(sycl::queue& q,
+                        sycl::half* Y,
+                        const sycl::half* X,
+                        const uint8_t* W_int4,
+                        const sycl::half* scales,
+                        const float* bias,
+                        int64_t M,
+                        int64_t N,
+                        int64_t K,
+                        int group_size) {
+    return linear_int4_impl<sycl::half, sycl::half>(q, Y, X, W_int4, scales, bias, M, N, K, group_size);
+}
+
+// FP16 in -> FP32 out (LM Head projection for logits)
+sycl::event linear_int4(sycl::queue& q,
+                        float* Y,
+                        const sycl::half* X,
+                        const uint8_t* W_int4,
+                        const sycl::half* scales,
+                        const float* bias,
+                        int64_t M,
+                        int64_t N,
+                        int64_t K,
+                        int group_size) {
+    return linear_int4_impl<sycl::half, float>(q, Y, X, W_int4, scales, bias, M, N, K, group_size);
+}
+
+// FP32 in -> FP32 out (Reference and oracle testing)
+sycl::event linear_int4(sycl::queue& q,
+                        float* Y,
+                        const float* X,
+                        const uint8_t* W_int4,
+                        const sycl::half* scales,
+                        const float* bias,
+                        int64_t M,
+                        int64_t N,
+                        int64_t K,
+                        int group_size) {
+    return linear_int4_impl<float, float>(q, Y, X, W_int4, scales, bias, M, N, K, group_size);
+}
+
 // Wide fused INT4 Vector Engine GEMV for multiple projections sharing input X
-sycl::event linear_int4_fused(sycl::queue& q,
-                              const float* X,
-                              const FusedProjectionDesc* descs,
-                              int num_descs,
-                              int64_t M,
-                              int64_t K,
-                              int group_size) {
+template <typename InT, typename DescT>
+sycl::event linear_int4_fused_impl(sycl::queue& q,
+                                   const InT* X,
+                                   const DescT* descs,
+                                   int num_descs,
+                                   int64_t M,
+                                   int64_t K,
+                                   int group_size) {
     if (M <= 0 || K <= 0 || num_descs <= 0 || !descs || num_descs > 4) return sycl::event{};
     int64_t num_groups = K / group_size;
 
@@ -155,7 +200,7 @@ sycl::event linear_int4_fused(sycl::queue& q,
     constexpr size_t WG_SIZE = 64; // 4 sub-groups per workgroup
     constexpr int64_t ROWS_PER_SG = 2;
 
-    FusedLinearParams params;
+    FusedLinearParamsT<DescT> params;
     params.num_descs = num_descs;
     int64_t cur_sg_offset = 0;
     for (int i = 0; i < num_descs; ++i) {
@@ -192,7 +237,7 @@ sycl::event linear_int4_fused(sycl::queue& q,
                 int64_t cur_N = params.descs[p].N;
                 size_t lane = sg.get_local_linear_id();
 
-                const float* row_x = X + m * K;
+                const InT* row_x = X + m * K;
                 const uint8_t* row_w0 = params.descs[p].W_int4 + n0 * (K / 2);
                 const uint8_t* row_w1 = (n1 < cur_N) ? (params.descs[p].W_int4 + n1 * (K / 2)) : nullptr;
                 const sycl::half* scales0 = params.descs[p].scales + n0 * num_groups;
@@ -206,14 +251,14 @@ sycl::event linear_int4_fused(sycl::queue& q,
                     int64_t base_byte = base_k / 2;
                     int64_t k_offset = base_k + lane * 8;
 
-                    float x0 = row_x[k_offset + 0];
-                    float x1 = row_x[k_offset + 1];
-                    float x2 = row_x[k_offset + 2];
-                    float x3 = row_x[k_offset + 3];
-                    float x4 = row_x[k_offset + 4];
-                    float x5 = row_x[k_offset + 5];
-                    float x6 = row_x[k_offset + 6];
-                    float x7 = row_x[k_offset + 7];
+                    float x0 = static_cast<float>(row_x[k_offset + 0]);
+                    float x1 = static_cast<float>(row_x[k_offset + 1]);
+                    float x2 = static_cast<float>(row_x[k_offset + 2]);
+                    float x3 = static_cast<float>(row_x[k_offset + 3]);
+                    float x4 = static_cast<float>(row_x[k_offset + 4]);
+                    float x5 = static_cast<float>(row_x[k_offset + 5]);
+                    float x6 = static_cast<float>(row_x[k_offset + 6]);
+                    float x7 = static_cast<float>(row_x[k_offset + 7]);
 
                     // Row 0
                     float scale0 = static_cast<float>(scales0[g]);
@@ -253,32 +298,55 @@ sycl::event linear_int4_fused(sycl::queue& q,
                 float total0 = sycl::reduce_over_group(sg, lane_acc0, sycl::plus<float>());
                 if (lane == 0) {
                     if (params.descs[p].bias) total0 += params.descs[p].bias[n0];
-                    params.descs[p].Y[m * cur_N + n0] = total0;
+                    using OutElemT = std::remove_pointer_t<decltype(params.descs[p].Y)>;
+                    params.descs[p].Y[m * cur_N + n0] = static_cast<OutElemT>(total0);
                 }
 
                 if (row_w1) {
                     float total1 = sycl::reduce_over_group(sg, lane_acc1, sycl::plus<float>());
                     if (lane == 0) {
                         if (params.descs[p].bias) total1 += params.descs[p].bias[n1];
-                        params.descs[p].Y[m * cur_N + n1] = total1;
+                        using OutElemT = std::remove_pointer_t<decltype(params.descs[p].Y)>;
+                        params.descs[p].Y[m * cur_N + n1] = static_cast<OutElemT>(total1);
                     }
                 }
             });
     });
 }
 
+sycl::event linear_int4_fused(sycl::queue& q,
+                              const sycl::half* X,
+                              const FusedProjectionDesc* descs,
+                              int num_descs,
+                              int64_t M,
+                              int64_t K,
+                              int group_size) {
+    return linear_int4_fused_impl<sycl::half, FusedProjectionDesc>(q, X, descs, num_descs, M, K, group_size);
+}
+
+sycl::event linear_int4_fused(sycl::queue& q,
+                              const float* X,
+                              const FusedProjectionDescFP32* descs,
+                              int num_descs,
+                              int64_t M,
+                              int64_t K,
+                              int group_size) {
+    return linear_int4_fused_impl<float, FusedProjectionDescFP32>(q, X, descs, num_descs, M, K, group_size);
+}
+
 // Fused MLP Gate + Up + SwiGLU
-sycl::event mlp_gate_up_swiglu_int4(sycl::queue& q,
-                                    float* Y_swiglu,
-                                    const float* X,
-                                    const uint8_t* W_gate,
-                                    const sycl::half* scales_gate,
-                                    const uint8_t* W_up,
-                                    const sycl::half* scales_up,
-                                    int64_t M,
-                                    int64_t N,
-                                    int64_t K,
-                                    int group_size) {
+template <typename InT, typename OutT>
+sycl::event mlp_gate_up_swiglu_int4_impl(sycl::queue& q,
+                                         OutT* Y_swiglu,
+                                         const InT* X,
+                                         const uint8_t* W_gate,
+                                         const sycl::half* scales_gate,
+                                         const uint8_t* W_up,
+                                         const sycl::half* scales_up,
+                                         int64_t M,
+                                         int64_t N,
+                                         int64_t K,
+                                         int group_size) {
     if (M <= 0 || N <= 0 || K <= 0) return sycl::event{};
     int64_t num_groups = K / group_size;
 
@@ -301,7 +369,7 @@ sycl::event mlp_gate_up_swiglu_int4(sycl::queue& q,
                 int64_t n = global_sg_id % N;
                 size_t lane = sg.get_local_linear_id();
 
-                const float* row_x = X + m * K;
+                const InT* row_x = X + m * K;
                 const uint8_t* row_wg = W_gate + n * (K / 2);
                 const uint8_t* row_wu = W_up + n * (K / 2);
                 const sycl::half* scales_g = scales_gate + n * num_groups;
@@ -316,14 +384,14 @@ sycl::event mlp_gate_up_swiglu_int4(sycl::queue& q,
                     int64_t k_offset = base_k + lane * 8;
 
                     // Load 8 contiguous activation floats into registers ONCE
-                    float x0 = row_x[k_offset + 0];
-                    float x1 = row_x[k_offset + 1];
-                    float x2 = row_x[k_offset + 2];
-                    float x3 = row_x[k_offset + 3];
-                    float x4 = row_x[k_offset + 4];
-                    float x5 = row_x[k_offset + 5];
-                    float x6 = row_x[k_offset + 6];
-                    float x7 = row_x[k_offset + 7];
+                    float x0 = static_cast<float>(row_x[k_offset + 0]);
+                    float x1 = static_cast<float>(row_x[k_offset + 1]);
+                    float x2 = static_cast<float>(row_x[k_offset + 2]);
+                    float x3 = static_cast<float>(row_x[k_offset + 3]);
+                    float x4 = static_cast<float>(row_x[k_offset + 4]);
+                    float x5 = static_cast<float>(row_x[k_offset + 5]);
+                    float x6 = static_cast<float>(row_x[k_offset + 6]);
+                    float x7 = static_cast<float>(row_x[k_offset + 7]);
 
                     // Gate projection for row n
                     float scale_g = static_cast<float>(scales_g[g]);
@@ -364,10 +432,40 @@ sycl::event mlp_gate_up_swiglu_int4(sycl::queue& q,
 
                 if (lane == 0) {
                     float silu_g = total_g / (1.0f + sycl::exp(-total_g));
-                    Y_swiglu[m * N + n] = silu_g * total_u;
+                    Y_swiglu[m * N + n] = static_cast<OutT>(silu_g * total_u);
                 }
             });
     });
+}
+
+sycl::event mlp_gate_up_swiglu_int4(sycl::queue& q,
+                                    sycl::half* Y_swiglu,
+                                    const sycl::half* X,
+                                    const uint8_t* W_gate,
+                                    const sycl::half* scales_gate,
+                                    const uint8_t* W_up,
+                                    const sycl::half* scales_up,
+                                    int64_t M,
+                                    int64_t N,
+                                    int64_t K,
+                                    int group_size) {
+    return mlp_gate_up_swiglu_int4_impl<sycl::half, sycl::half>(
+        q, Y_swiglu, X, W_gate, scales_gate, W_up, scales_up, M, N, K, group_size);
+}
+
+sycl::event mlp_gate_up_swiglu_int4(sycl::queue& q,
+                                    float* Y_swiglu,
+                                    const float* X,
+                                    const uint8_t* W_gate,
+                                    const sycl::half* scales_gate,
+                                    const uint8_t* W_up,
+                                    const sycl::half* scales_up,
+                                    int64_t M,
+                                    int64_t N,
+                                    int64_t K,
+                                    int group_size) {
+    return mlp_gate_up_swiglu_int4_impl<float, float>(
+        q, Y_swiglu, X, W_gate, scales_gate, W_up, scales_up, M, N, K, group_size);
 }
 
 // =============================================================================
