@@ -88,7 +88,19 @@ struct ModelConfig {
     int64_t full_v_dim() const noexcept { return num_key_value_heads * head_dim; }         // 1024
     int64_t full_out_dim() const noexcept { return num_attention_heads * head_dim; }       // 6144
 
+    // Dynamic layer types: if loaded from artifact metadata or populated from sections,
+    // matches official transformers/models/qwen3_5/modeling_qwen3_5.py (Qwen3_5DecoderLayer, lines 733-739)
+    // and config.json (text_config.layer_types).
+    std::vector<std::string> layer_types;
+
     int64_t num_full_layers() const noexcept {
+        if (!layer_types.empty()) {
+            int64_t count = 0;
+            for (const auto& t : layer_types) {
+                if (t == "full_attention") count++;
+            }
+            return count;
+        }
         int64_t count = 0;
         for (int64_t l = 0; l < num_hidden_layers; ++l) {
             if (l % 4 == 3) count++;
@@ -98,6 +110,13 @@ struct ModelConfig {
 
     int64_t num_linear_layers() const noexcept {
         return num_hidden_layers - num_full_layers();
+    }
+
+    bool is_full_attention_layer(int64_t l) const noexcept {
+        if (l >= 0 && l < static_cast<int64_t>(layer_types.size())) {
+            return layer_types[l] == "full_attention";
+        }
+        return (l % 4 == 3);
     }
 
     core::KVCacheConfig create_kv_cache_config(size_t max_seq_len = 8192) const noexcept {

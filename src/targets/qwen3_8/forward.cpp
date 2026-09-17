@@ -125,7 +125,17 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
             int64_t head_dim = cfg.head_dim;
             int64_t q_gate_dim = cfg.full_q_gate_dim();
 
-            // Extract Q from interleaved act_q_gate [seq_len, num_q_heads, 2 * head_dim]
+            // Q and Gate extraction and output gating:
+            // Citing official transformers/models/qwen3_5/modeling_qwen3_5.py (Qwen3_5Attention.forward, lines 654-688):
+            //   query_states, gate = torch.chunk(
+            //       self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2), 2, dim=-1
+            //   )
+            //   gate = gate.reshape(*input_shape, -1)
+            //   ...
+            //   attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+            //   attn_output = attn_output * torch.sigmoid(gate)
+            // For each of the num_q_heads (24), q_proj produces 2 * head_dim = 512 channels.
+            // Chunk 0 (channels 0..255) is Q; Chunk 1 (channels 256..511) is Gate.
             q.parallel_for(sycl::range<2>(seq_len, num_q_heads), [=](sycl::id<2> idx) {
                 int64_t t = idx[0];
                 int64_t h = idx[1];
@@ -134,7 +144,7 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
                 }
             });
 
-            // Head RMSNorm on Q and K
+            // Head RMSNorm on Q and K (Qwen3_5RMSNorm: 1.0 + weight, only on head_dim)
             ops::rmsnorm(q, act_q, act_q, layer.d_q_norm, seq_len * num_q_heads, head_dim);
             ops::rmsnorm(q, act_k, act_k, layer.d_k_norm, seq_len * cfg.num_key_value_heads, head_dim);
 
@@ -152,7 +162,7 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
                                     start_pos, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, 0.0f,
                                     static_cast<int64_t>(kv_cache.max_seq_len()));
 
-            // Output gating: attn_out *= sigmoid(gate)
+            // Output gating: attn_out *= sigmoid(gate) matching torch.sigmoid(gate)
             q.parallel_for(sycl::range<2>(seq_len, num_q_heads), [=](sycl::id<2> idx) {
                 int64_t t = idx[0];
                 int64_t h = idx[1];

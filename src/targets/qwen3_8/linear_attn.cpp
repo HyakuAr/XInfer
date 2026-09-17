@@ -117,6 +117,17 @@ sycl::event recurrent_gated_delta_net(sycl::queue& q,
             [=](sycl::nd_item<2> item) [[sycl::reqd_sub_group_size(16)]] {
                 int64_t h = item.get_group(0);
                 int64_t j = item.get_local_id(1); // 0..127
+
+                // GQA head grouping: h_k = h / 3.
+                // Citing official transformers/models/qwen3_5/modeling_qwen3_5.py (Qwen3_5GatedDeltaNet.forward, lines 428-444, 479-482):
+                //   self.num_v_heads = 48, self.num_k_heads = 16
+                //   in_proj_qkv outputs [key_dim (2048), key_dim (2048), value_dim (6144)] = 10240 channels.
+                //   if self.num_v_heads // self.num_k_heads > 1: (48 // 16 == 3)
+                //       query = query.repeat_interleave(3, dim=2)
+                //       key = key.repeat_interleave(3, dim=2)
+                // repeat_interleave replicates each Q/K head 3 consecutive times:
+                // K-head 0 serves V-heads 0, 1, 2; K-head 1 serves V-heads 3, 4, 5; K-head h_k serves V-heads 3*h_k..3*h_k+2.
+                // Thus for value head h in [0, 47], the corresponding Q and K head index is exactly h / 3 (in [0, 15]).
                 int64_t h_k = h / 3;
                 sycl::sub_group sg = item.get_sub_group();
                 size_t sg_id = sg.get_group_linear_id();

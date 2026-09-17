@@ -224,6 +224,8 @@ def main():
             "max_position_embeddings": str(text_cfg.get("max_position_embeddings", 262144)),
             "rms_norm_eps": str(text_cfg.get("rms_norm_eps", 1e-6)),
             "rope_theta": str(text_cfg.get("rope_parameters", {}).get("rope_theta", 10000000)),
+            "full_attention_interval": str(text_cfg.get("full_attention_interval", 4)),
+            "layer_types": json.dumps(text_cfg.get("layer_types", [])),
         }
     }
     meta_json_bytes = json.dumps(metadata, indent=2).encode("utf-8")

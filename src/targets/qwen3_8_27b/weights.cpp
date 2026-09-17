@@ -173,8 +173,19 @@ std::unique_ptr<LoadedModel> LoadedModel::load_from_artifact(
         return view;
     };
 
-    // Helper lambda to load BF16 tensor and convert to FP32 on device
-    // If add_unit_offset is true, scales as (1.0 + weight) matching Qwen3_5RMSNorm specification
+    // Helper lambda to load BF16 tensor and convert to FP32 on device.
+    // If add_unit_offset is true, scales as (1.0 + weight) matching Qwen3_5RMSNorm specification:
+    // Citing official transformers/models/qwen3_5/modeling_qwen3_5.py:
+    // - class Qwen3_5RMSNorm (lines 711-727, 807-808):
+    //     self.weight = nn.Parameter(torch.zeros(dim))
+    //     output = output * (1.0 + self.weight.float())
+    //   "We initialize with 0s to be 1 centered as the RMSNorm here does (1 + weight)"
+    //   Used for: input_layernorm (line 741), post_attention_layernorm (line 742),
+    //   q_norm (line 644), k_norm (line 645), and final norm (line 1218).
+    // - In contrast, class Qwen3_5RMSNormGated (lines 175-188, 392) used in linear attention:
+    //     self.weight = nn.Parameter(torch.ones(hidden_size))
+    //     hidden_states = self.weight * hidden_states
+    //   is 1.0-initialized and does NOT use (1.0 + weight) offset.
     auto load_bf16_as_fp32 = [&](const std::string& section_name, size_t num_elements, bool add_unit_offset = false) -> float* {
         std::vector<uint8_t> host_raw;
         if (!reader.read_section(section_name, host_raw, error_msg)) {
@@ -252,6 +263,8 @@ std::unique_ptr<LoadedModel> LoadedModel::load_from_artifact(
 
     // 4. Layers
     model->layers_.resize(model->config_.num_hidden_layers);
+    model->config_.layer_types.clear();
+    model->config_.layer_types.reserve(model->config_.num_hidden_layers);
 
     for (int l = 0; l < model->config_.num_hidden_layers; ++l) {
         LayerWeights& layer = model->layers_[l];
@@ -300,9 +313,27 @@ std::unique_ptr<LoadedModel> LoadedModel::load_from_artifact(
             return nullptr;
         }
 
-        // Token Mixer: alternating 3 linear attention and 1 full attention
-        if (l % 4 == 3) {
+        // Token Mixer: determine layer type directly from artifact sections instead of an arithmetic guess.
+        // Citing transformers/models/qwen3_5/modeling_qwen3_5.py (Qwen3_5DecoderLayer.__init__, lines 733-739)
+        // and config.json (text_config.layer_types and text_config.full_attention_interval = 4):
+        //   self.layer_type = config.layer_types[layer_idx]
+        //   if self.layer_type == "linear_attention": self.linear_attn = Qwen3_5GatedDeltaNet(...)
+        //   elif self.layer_type == "full_attention": self.self_attn = Qwen3_5Attention(...)
+        // Inspect actual artifact container sections to support non-uniform configurations without guessing.
+        bool has_full_attn = reader.has_section(prefix + ".self_attn.q_proj.weight");
+        bool has_linear_attn = reader.has_section(prefix + ".linear_attn.in_proj_qkv.weight");
+
+        if (has_full_attn && !has_linear_attn) {
             layer.layer_type = "full_attention";
+        } else if (has_linear_attn && !has_full_attn) {
+            layer.layer_type = "linear_attention";
+        } else {
+            // Fallback to config layer_types if pre-configured, or interval formula (l % 4 == 3)
+            layer.layer_type = model->config_.is_full_attention_layer(l) ? "full_attention" : "linear_attention";
+        }
+        model->config_.layer_types.push_back(layer.layer_type);
+
+        if (layer.layer_type == "full_attention") {
             layer.q_proj = load_linear(prefix + ".self_attn.q_proj.weight", model->config_.full_q_gate_dim(), model->config_.hidden_size);
             if (!layer.q_proj.is_valid()) {
                 std::string msg = "Failed to load self_attn.q_proj for layer " + std::to_string(l);
