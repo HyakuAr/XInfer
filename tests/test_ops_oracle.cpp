@@ -4,6 +4,7 @@
 #include "ops/elementwise.h"
 #include "ops/softmax.h"
 #include "ops/linear.h"
+#include "ops/gemm_xmx.h"
 #include "ops/attention.h"
 #include "ops/sampling.h"
 

@@ -1,13 +1,19 @@
 // Citing vendor documentation per AGENTS.md §5:
+// - docs/vendor/b60-matrix-caps.md (Sections 1-4):
+//   Verified matrix combinations on Intel Arc Pro B60: FP16 M=16, N=16, K=16 supported;
+//   no native INT4 support. For M=1 decode, SLM unpack + XMX is 7.5x slower than Vector Engine GEMV.
 // - docs/vendor/xmx-joint-matrix.md (lines 41-52, 77-85):
 //   SYCL Joint Matrix API (sycl::ext::oneapi::experimental::matrix)
 //   Tile primitives: joint_matrix<sub_group, ...>, joint_matrix_fill,
 //   joint_matrix_load, joint_matrix_mad, joint_matrix_store.
-//   B60 supported matrix combinations: M=16, N=16, K=16 (FP16/FP16 -> FP32).
 // - docs/vendor/xe-gpu-architecture.md (lines 22-39):
 //   Intel Arc Pro B60 (Battlemage Xe2-HPG): 20 Xe-cores, sub-group sizes 16, 32.
 // - docs/vendor/thread-mapping-occupancy.md (lines 9-15):
 //   Sub-group size 16 maps to one Vector Engine hardware thread; work-group to Xe-core.
+
+// NOTE: This kernel is RETIRED from the active engine and retained strictly as a
+// reference-only implementation for dense FP16 GEMM oracle tests. The production
+// Qwen3.8-27B INT4 decode path uses linear_int4 (Vector Engine SIMD16 GEMV).
 
 #include "gemm_xmx.h"
 #include <sycl/ext/oneapi/matrix/matrix.hpp>

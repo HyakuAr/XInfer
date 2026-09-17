@@ -5,7 +5,18 @@
 
 namespace xinfer::ops {
 
-// XMX-accelerated GEMM: C = A * B
+// =============================================================================
+// [RETIRED / REFERENCE-ONLY] Dense FP16 XMX Systolic GEMM
+// =============================================================================
+// Note: This kernel is retired from the production inference path.
+// The Intel Arc Pro B60 XMX systolic units do NOT natively support INT4
+// (verified in docs/vendor/b60-matrix-caps.md).
+// For M=1 decode, empirical testing proves that unpacking INT4 to SLM to feed XMX
+// is 7.5x slower than direct Vector Engine streaming (51 GB/s vs 383.7 GB/s).
+// Production decode uses Vector Engine GEMV (linear_int4 in src/ops/linear.h).
+// This file is retained as an oracle/reference implementation for dense FP16 GEMM.
+
+// XMX-accelerated dense FP16 GEMM: C = A * B
 // A: [M, K] in FP16/half
 // B: [K, N] in FP16/half
 // C: [M, N] in FP32

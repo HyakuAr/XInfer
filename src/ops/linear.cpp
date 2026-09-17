@@ -1,9 +1,9 @@
 // Citing vendor documentation per AGENTS.md §5:
-// - docs/vendor/xmx-joint-matrix.md (lines 41-52, 77-85):
-//   SYCL Joint Matrix API (sycl::ext::oneapi::experimental::matrix)
-//   Tile primitives: joint_matrix<sub_group, ...>, joint_matrix_fill,
-//   joint_matrix_load, joint_matrix_mad, joint_matrix_store.
-//   Supported combinations on Arc Pro B60: M=16, N=16, K=16 (FP16/FP16 -> FP32).
+// - docs/vendor/b60-matrix-caps.md (Sections 2-4):
+//   Hardware matrix combinations on Arc Pro B60: no native INT4 support in XMX.
+//   M=1 decode is memory bandwidth-bound (4 FLOP/byte).
+//   Vector Engine SIMD16 cooperative GEMV achieves 383.7 GB/s (84% peak bandwidth);
+//   INT4-unpack-to-SLM + XMX Joint Matrix is 7.5x slower (0.902 ms vs 0.120 ms).
 // - docs/vendor/xe-gpu-architecture.md (lines 22-39):
 //   Intel Arc Pro B60: 20 Xe-cores, 8 Vector Engines per core, 8 HW threads per VE
 //   = 64 HW threads per core (1280 total). Sub-group size: 16, 32.
@@ -14,14 +14,11 @@
 //   Subgroup-level reduction and coalesced loads along the reduction (K) dimension.
 
 #include "linear.h"
-#include <sycl/ext/oneapi/matrix/matrix.hpp>
 
 namespace xinfer::ops {
 
-using namespace sycl::ext::oneapi::experimental::matrix;
-
 // =============================================================================
-// Milestone 7 Accelerated INT4 Linear Kernel
+// Vector Engine INT4 GEMV Kernel (Milestone 7 / M10 Production Path)
 // =============================================================================
 
 sycl::event linear_int4(sycl::queue& q,
