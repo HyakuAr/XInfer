@@ -140,6 +140,236 @@ sycl::event linear_int4(sycl::queue& q,
     });
 }
 
+// Wide fused INT4 Vector Engine GEMV for multiple projections sharing input X
+sycl::event linear_int4_fused(sycl::queue& q,
+                              const float* X,
+                              const FusedProjectionDesc* descs,
+                              int num_descs,
+                              int64_t M,
+                              int64_t K,
+                              int group_size) {
+    if (M <= 0 || K <= 0 || num_descs <= 0 || !descs || num_descs > 4) return sycl::event{};
+    int64_t num_groups = K / group_size;
+
+    constexpr size_t SG_SIZE = 16;
+    constexpr size_t WG_SIZE = 64; // 4 sub-groups per workgroup
+    constexpr int64_t ROWS_PER_SG = 2;
+
+    FusedLinearParams params;
+    params.num_descs = num_descs;
+    int64_t cur_sg_offset = 0;
+    for (int i = 0; i < num_descs; ++i) {
+        params.descs[i] = descs[i];
+        params.sg_offsets[i] = cur_sg_offset;
+        int64_t sgs = (descs[i].N + ROWS_PER_SG - 1) / ROWS_PER_SG;
+        cur_sg_offset += sgs;
+    }
+    params.total_sgs_per_m = cur_sg_offset;
+
+    size_t total_subgroups = static_cast<size_t>(M * params.total_sgs_per_m);
+    size_t global_threads = total_subgroups * SG_SIZE;
+    size_t padded_global = ((global_threads + WG_SIZE - 1) / WG_SIZE) * WG_SIZE;
+
+    return q.submit([&](sycl::handler& cgh) {
+        cgh.parallel_for(
+            sycl::nd_range<1>(padded_global, WG_SIZE),
+            [=](sycl::nd_item<1> item) [[sycl::reqd_sub_group_size(SG_SIZE)]] {
+                sycl::sub_group sg = item.get_sub_group();
+                size_t global_sg_id = item.get_global_linear_id() / SG_SIZE;
+                if (global_sg_id >= total_subgroups) return;
+
+                int64_t m = global_sg_id / params.total_sgs_per_m;
+                int64_t sg_in_m = global_sg_id % params.total_sgs_per_m;
+
+                int p = 0;
+                if (params.num_descs > 1 && sg_in_m >= params.sg_offsets[1]) p = 1;
+                if (params.num_descs > 2 && sg_in_m >= params.sg_offsets[2]) p = 2;
+                if (params.num_descs > 3 && sg_in_m >= params.sg_offsets[3]) p = 3;
+
+                int64_t local_sg = sg_in_m - params.sg_offsets[p];
+                int64_t n0 = local_sg * ROWS_PER_SG;
+                int64_t n1 = n0 + 1;
+                int64_t cur_N = params.descs[p].N;
+                size_t lane = sg.get_local_linear_id();
+
+                const float* row_x = X + m * K;
+                const uint8_t* row_w0 = params.descs[p].W_int4 + n0 * (K / 2);
+                const uint8_t* row_w1 = (n1 < cur_N) ? (params.descs[p].W_int4 + n1 * (K / 2)) : nullptr;
+                const sycl::half* scales0 = params.descs[p].scales + n0 * num_groups;
+                const sycl::half* scales1 = (n1 < cur_N) ? (params.descs[p].scales + n1 * num_groups) : nullptr;
+
+                float lane_acc0 = 0.0f;
+                float lane_acc1 = 0.0f;
+
+                for (int64_t g = 0; g < num_groups; ++g) {
+                    int64_t base_k = g * group_size;
+                    int64_t base_byte = base_k / 2;
+                    int64_t k_offset = base_k + lane * 8;
+
+                    float x0 = row_x[k_offset + 0];
+                    float x1 = row_x[k_offset + 1];
+                    float x2 = row_x[k_offset + 2];
+                    float x3 = row_x[k_offset + 3];
+                    float x4 = row_x[k_offset + 4];
+                    float x5 = row_x[k_offset + 5];
+                    float x6 = row_x[k_offset + 6];
+                    float x7 = row_x[k_offset + 7];
+
+                    // Row 0
+                    float scale0 = static_cast<float>(scales0[g]);
+                    const uint32_t* w0_u32 = reinterpret_cast<const uint32_t*>(row_w0 + base_byte);
+                    uint32_t p0 = w0_u32[lane];
+                    int32_t sp0 = static_cast<int32_t>(p0);
+                    float dot0 =
+                        x0 * static_cast<float>((sp0 << 28) >> 28) +
+                        x1 * static_cast<float>((sp0 << 24) >> 28) +
+                        x2 * static_cast<float>((sp0 << 20) >> 28) +
+                        x3 * static_cast<float>((sp0 << 16) >> 28) +
+                        x4 * static_cast<float>((sp0 << 12) >> 28) +
+                        x5 * static_cast<float>((sp0 << 8) >> 28) +
+                        x6 * static_cast<float>((sp0 << 4) >> 28) +
+                        x7 * static_cast<float>(sp0 >> 28);
+                    lane_acc0 += dot0 * scale0;
+
+                    // Row 1
+                    if (row_w1) {
+                        float scale1 = static_cast<float>(scales1[g]);
+                        const uint32_t* w1_u32 = reinterpret_cast<const uint32_t*>(row_w1 + base_byte);
+                        uint32_t p1 = w1_u32[lane];
+                        int32_t sp1 = static_cast<int32_t>(p1);
+                        float dot1 =
+                            x0 * static_cast<float>((sp1 << 28) >> 28) +
+                            x1 * static_cast<float>((sp1 << 24) >> 28) +
+                            x2 * static_cast<float>((sp1 << 20) >> 28) +
+                            x3 * static_cast<float>((sp1 << 16) >> 28) +
+                            x4 * static_cast<float>((sp1 << 12) >> 28) +
+                            x5 * static_cast<float>((sp1 << 8) >> 28) +
+                            x6 * static_cast<float>((sp1 << 4) >> 28) +
+                            x7 * static_cast<float>(sp1 >> 28);
+                        lane_acc1 += dot1 * scale1;
+                    }
+                }
+
+                float total0 = sycl::reduce_over_group(sg, lane_acc0, sycl::plus<float>());
+                if (lane == 0) {
+                    if (params.descs[p].bias) total0 += params.descs[p].bias[n0];
+                    params.descs[p].Y[m * cur_N + n0] = total0;
+                }
+
+                if (row_w1) {
+                    float total1 = sycl::reduce_over_group(sg, lane_acc1, sycl::plus<float>());
+                    if (lane == 0) {
+                        if (params.descs[p].bias) total1 += params.descs[p].bias[n1];
+                        params.descs[p].Y[m * cur_N + n1] = total1;
+                    }
+                }
+            });
+    });
+}
+
+// Fused MLP Gate + Up + SwiGLU
+sycl::event mlp_gate_up_swiglu_int4(sycl::queue& q,
+                                    float* Y_swiglu,
+                                    const float* X,
+                                    const uint8_t* W_gate,
+                                    const sycl::half* scales_gate,
+                                    const uint8_t* W_up,
+                                    const sycl::half* scales_up,
+                                    int64_t M,
+                                    int64_t N,
+                                    int64_t K,
+                                    int group_size) {
+    if (M <= 0 || N <= 0 || K <= 0) return sycl::event{};
+    int64_t num_groups = K / group_size;
+
+    constexpr size_t SG_SIZE = 16;
+    constexpr size_t WG_SIZE = 64; // 4 sub-groups per workgroup
+
+    size_t total_subgroups = static_cast<size_t>(M * N);
+    size_t global_threads = total_subgroups * SG_SIZE;
+    size_t padded_global = ((global_threads + WG_SIZE - 1) / WG_SIZE) * WG_SIZE;
+
+    return q.submit([&](sycl::handler& cgh) {
+        cgh.parallel_for(
+            sycl::nd_range<1>(padded_global, WG_SIZE),
+            [=](sycl::nd_item<1> item) [[sycl::reqd_sub_group_size(SG_SIZE)]] {
+                sycl::sub_group sg = item.get_sub_group();
+                size_t global_sg_id = item.get_global_linear_id() / SG_SIZE;
+                if (global_sg_id >= total_subgroups) return;
+
+                int64_t m = global_sg_id / N;
+                int64_t n = global_sg_id % N;
+                size_t lane = sg.get_local_linear_id();
+
+                const float* row_x = X + m * K;
+                const uint8_t* row_wg = W_gate + n * (K / 2);
+                const uint8_t* row_wu = W_up + n * (K / 2);
+                const sycl::half* scales_g = scales_gate + n * num_groups;
+                const sycl::half* scales_u = scales_up + n * num_groups;
+
+                float lane_acc_g = 0.0f;
+                float lane_acc_u = 0.0f;
+
+                for (int64_t g = 0; g < num_groups; ++g) {
+                    int64_t base_k = g * group_size;
+                    int64_t base_byte = base_k / 2;
+                    int64_t k_offset = base_k + lane * 8;
+
+                    // Load 8 contiguous activation floats into registers ONCE
+                    float x0 = row_x[k_offset + 0];
+                    float x1 = row_x[k_offset + 1];
+                    float x2 = row_x[k_offset + 2];
+                    float x3 = row_x[k_offset + 3];
+                    float x4 = row_x[k_offset + 4];
+                    float x5 = row_x[k_offset + 5];
+                    float x6 = row_x[k_offset + 6];
+                    float x7 = row_x[k_offset + 7];
+
+                    // Gate projection for row n
+                    float scale_g = static_cast<float>(scales_g[g]);
+                    const uint32_t* wg_u32 = reinterpret_cast<const uint32_t*>(row_wg + base_byte);
+                    uint32_t pg = wg_u32[lane];
+                    int32_t spg = static_cast<int32_t>(pg);
+                    float dot_g =
+                        x0 * static_cast<float>((spg << 28) >> 28) +
+                        x1 * static_cast<float>((spg << 24) >> 28) +
+                        x2 * static_cast<float>((spg << 20) >> 28) +
+                        x3 * static_cast<float>((spg << 16) >> 28) +
+                        x4 * static_cast<float>((spg << 12) >> 28) +
+                        x5 * static_cast<float>((spg << 8) >> 28) +
+                        x6 * static_cast<float>((spg << 4) >> 28) +
+                        x7 * static_cast<float>(spg >> 28);
+                    lane_acc_g += dot_g * scale_g;
+
+                    // Up projection for row n (reuses x0..x7 from registers!)
+                    float scale_u = static_cast<float>(scales_u[g]);
+                    const uint32_t* wu_u32 = reinterpret_cast<const uint32_t*>(row_wu + base_byte);
+                    uint32_t pu = wu_u32[lane];
+                    int32_t spu = static_cast<int32_t>(pu);
+                    float dot_u =
+                        x0 * static_cast<float>((spu << 28) >> 28) +
+                        x1 * static_cast<float>((spu << 24) >> 28) +
+                        x2 * static_cast<float>((spu << 20) >> 28) +
+                        x3 * static_cast<float>((spu << 16) >> 28) +
+                        x4 * static_cast<float>((spu << 12) >> 28) +
+                        x5 * static_cast<float>((spu << 8) >> 28) +
+                        x6 * static_cast<float>((spu << 4) >> 28) +
+                        x7 * static_cast<float>(spu >> 28);
+                    lane_acc_u += dot_u * scale_u;
+                }
+
+                // Sub-group parallel reductions
+                float total_g = sycl::reduce_over_group(sg, lane_acc_g, sycl::plus<float>());
+                float total_u = sycl::reduce_over_group(sg, lane_acc_u, sycl::plus<float>());
+
+                if (lane == 0) {
+                    float silu_g = total_g / (1.0f + sycl::exp(-total_g));
+                    Y_swiglu[m * N + n] = silu_g * total_u;
+                }
+            });
+    });
+}
+
 // =============================================================================
 // Reference-Only Naive Implementations (Preserved for numerical validation)
 // =============================================================================

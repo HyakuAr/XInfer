@@ -49,7 +49,6 @@ private:
     float* act_normed_{nullptr};
     float* act_proj_out_{nullptr};
     float* act_mlp_gate_{nullptr};
-    float* act_mlp_up_{nullptr};
 
     float* act_q_gate_{nullptr};
     float* act_q_{nullptr};

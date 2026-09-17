@@ -208,24 +208,17 @@ int main() {
         );
 
         if (layer.layer_type == "full_attention") {
-            // Full-Attention Projections
+            // Full-Attention Fused Projections
+            ops::FusedProjectionDesc fa_projs[3] = {
+                {act_q_gate, static_cast<const uint8_t*>(layer.q_proj.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.q_proj.d_scales), nullptr, cfg.full_q_gate_dim()},
+                {act_k, static_cast<const uint8_t*>(layer.k_proj.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.k_proj.d_scales), nullptr, cfg.full_k_dim()},
+                {act_v, static_cast<const uint8_t*>(layer.v_proj.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.v_proj.d_scales), nullptr, cfg.full_v_dim()}
+            };
             cat_events[CAT_LINEAR_ATTN].push_back(
-                ops::linear_int4(q, act_q_gate, act_normed,
-                                 static_cast<const uint8_t*>(layer.q_proj.d_weights_int4),
-                                 static_cast<const sycl::half*>(layer.q_proj.d_scales),
-                                 nullptr, 1, cfg.full_q_gate_dim(), hidden_size)
-            );
-            cat_events[CAT_LINEAR_ATTN].push_back(
-                ops::linear_int4(q, act_k, act_normed,
-                                 static_cast<const uint8_t*>(layer.k_proj.d_weights_int4),
-                                 static_cast<const sycl::half*>(layer.k_proj.d_scales),
-                                 nullptr, 1, cfg.full_k_dim(), hidden_size)
-            );
-            cat_events[CAT_LINEAR_ATTN].push_back(
-                ops::linear_int4(q, act_v, act_normed,
-                                 static_cast<const uint8_t*>(layer.v_proj.d_weights_int4),
-                                 static_cast<const sycl::half*>(layer.v_proj.d_scales),
-                                 nullptr, 1, cfg.full_v_dim(), hidden_size)
+                ops::linear_int4_fused(q, act_normed, fa_projs, 3, 1, hidden_size)
             );
 
             // Elementwise Q split
@@ -295,30 +288,19 @@ int main() {
 
             full_idx++;
         } else {
-            // Linear Attention Projections
+            // Linear Attention Fused Projections
+            ops::FusedProjectionDesc la_projs[4] = {
+                {act_qkv_raw, static_cast<const uint8_t*>(layer.in_proj_qkv.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.in_proj_qkv.d_scales), nullptr, cfg.linear_conv_channels},
+                {act_z, static_cast<const uint8_t*>(layer.in_proj_z.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.in_proj_z.d_scales), nullptr, cfg.linear_z_dim},
+                {act_b, static_cast<const uint8_t*>(layer.in_proj_b.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.in_proj_b.d_scales), nullptr, cfg.linear_b_dim},
+                {act_a, static_cast<const uint8_t*>(layer.in_proj_a.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.in_proj_a.d_scales), nullptr, cfg.linear_a_dim}
+            };
             cat_events[CAT_LINEAR_ATTN].push_back(
-                ops::linear_int4(q, act_qkv_raw, act_normed,
-                                 static_cast<const uint8_t*>(layer.in_proj_qkv.d_weights_int4),
-                                 static_cast<const sycl::half*>(layer.in_proj_qkv.d_scales),
-                                 nullptr, 1, cfg.linear_conv_channels, hidden_size)
-            );
-            cat_events[CAT_LINEAR_ATTN].push_back(
-                ops::linear_int4(q, act_z, act_normed,
-                                 static_cast<const uint8_t*>(layer.in_proj_z.d_weights_int4),
-                                 static_cast<const sycl::half*>(layer.in_proj_z.d_scales),
-                                 nullptr, 1, cfg.linear_z_dim, hidden_size)
-            );
-            cat_events[CAT_LINEAR_ATTN].push_back(
-                ops::linear_int4(q, act_b, act_normed,
-                                 static_cast<const uint8_t*>(layer.in_proj_b.d_weights_int4),
-                                 static_cast<const sycl::half*>(layer.in_proj_b.d_scales),
-                                 nullptr, 1, cfg.linear_b_dim, hidden_size)
-            );
-            cat_events[CAT_LINEAR_ATTN].push_back(
-                ops::linear_int4(q, act_a, act_normed,
-                                 static_cast<const uint8_t*>(layer.in_proj_a.d_weights_int4),
-                                 static_cast<const sycl::half*>(layer.in_proj_a.d_scales),
-                                 nullptr, 1, cfg.linear_a_dim, hidden_size)
+                ops::linear_int4_fused(q, act_normed, la_projs, 4, 1, hidden_size)
             );
 
             // Causal Conv1d
@@ -355,23 +337,14 @@ int main() {
             ops::rmsnorm(q, act_normed, act_x, layer.d_post_attention_layernorm, 1, hidden_size)
         );
 
-        // MLP Gate + Up Projections
+        // Fused MLP Gate + Up + SwiGLU: SiLU(gate) * up directly in sub-group registers
         cat_events[CAT_LINEAR_MLP].push_back(
-            ops::linear_int4(q, act_mlp_gate, act_normed,
-                             static_cast<const uint8_t*>(layer.gate_proj.d_weights_int4),
-                             static_cast<const sycl::half*>(layer.gate_proj.d_scales),
-                             nullptr, 1, intermediate_size, hidden_size)
-        );
-        cat_events[CAT_LINEAR_MLP].push_back(
-            ops::linear_int4(q, act_mlp_up, act_normed,
-                             static_cast<const uint8_t*>(layer.up_proj.d_weights_int4),
-                             static_cast<const sycl::half*>(layer.up_proj.d_scales),
-                             nullptr, 1, intermediate_size, hidden_size)
-        );
-
-        // SwiGLU
-        cat_events[CAT_ELEMENTWISE].push_back(
-            ops::swiglu(q, act_mlp_gate, act_mlp_gate, act_mlp_up, intermediate_size)
+            ops::mlp_gate_up_swiglu_int4(q, act_mlp_gate, act_normed,
+                                         static_cast<const uint8_t*>(layer.gate_proj.d_weights_int4),
+                                         static_cast<const sycl::half*>(layer.gate_proj.d_scales),
+                                         static_cast<const uint8_t*>(layer.up_proj.d_weights_int4),
+                                         static_cast<const sycl::half*>(layer.up_proj.d_scales),
+                                         1, intermediate_size, hidden_size)
         );
 
         // MLP Down Projection

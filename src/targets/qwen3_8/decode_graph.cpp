@@ -47,7 +47,6 @@ DecodeGraph::DecodeGraph(std::shared_ptr<core::DeviceContext> ctx,
     act_normed_   = sycl::malloc_device<float>(hidden_size, q);
     act_proj_out_ = sycl::malloc_device<float>(hidden_size, q);
     act_mlp_gate_ = sycl::malloc_device<float>(intermediate_size, q);
-    act_mlp_up_   = sycl::malloc_device<float>(intermediate_size, q);
 
     act_q_gate_   = sycl::malloc_device<float>(cfg.full_q_gate_dim(), q);
     act_q_        = sycl::malloc_device<float>(cfg.full_q_dim(), q);
@@ -75,7 +74,6 @@ DecodeGraph::~DecodeGraph() {
     if (act_normed_)   sycl::free(act_normed_, q);
     if (act_proj_out_) sycl::free(act_proj_out_, q);
     if (act_mlp_gate_) sycl::free(act_mlp_gate_, q);
-    if (act_mlp_up_)   sycl::free(act_mlp_up_, q);
 
     if (act_q_gate_)   sycl::free(act_q_gate_, q);
     if (act_q_)        sycl::free(act_q_, q);
@@ -129,18 +127,15 @@ bool DecodeGraph::capture() {
             ops::rmsnorm(q, act_normed_, act_x_, layer.d_input_layernorm, 1, hidden_size);
 
             if (layer.layer_type == "full_attention") {
-                ops::linear_int4(q, act_q_gate_, act_normed_,
-                                 static_cast<const uint8_t*>(layer.q_proj.d_weights_int4),
-                                 static_cast<const sycl::half*>(layer.q_proj.d_scales),
-                                 nullptr, 1, cfg.full_q_gate_dim(), hidden_size);
-                ops::linear_int4(q, act_k_, act_normed_,
-                                 static_cast<const uint8_t*>(layer.k_proj.d_weights_int4),
-                                 static_cast<const sycl::half*>(layer.k_proj.d_scales),
-                                 nullptr, 1, cfg.full_k_dim(), hidden_size);
-                ops::linear_int4(q, act_v_, act_normed_,
-                                 static_cast<const uint8_t*>(layer.v_proj.d_weights_int4),
-                                 static_cast<const sycl::half*>(layer.v_proj.d_scales),
-                                 nullptr, 1, cfg.full_v_dim(), hidden_size);
+                ops::FusedProjectionDesc fa_projs[3] = {
+                    {act_q_gate_, static_cast<const uint8_t*>(layer.q_proj.d_weights_int4),
+                     static_cast<const sycl::half*>(layer.q_proj.d_scales), nullptr, cfg.full_q_gate_dim()},
+                    {act_k_, static_cast<const uint8_t*>(layer.k_proj.d_weights_int4),
+                     static_cast<const sycl::half*>(layer.k_proj.d_scales), nullptr, cfg.full_k_dim()},
+                    {act_v_, static_cast<const uint8_t*>(layer.v_proj.d_weights_int4),
+                     static_cast<const sycl::half*>(layer.v_proj.d_scales), nullptr, cfg.full_v_dim()}
+                };
+                ops::linear_int4_fused(q, act_normed_, fa_projs, 3, 1, hidden_size);
 
                 float* q_ptr = act_q_;
                 float* q_gate_ptr = act_q_gate_;
@@ -200,22 +195,17 @@ bool DecodeGraph::capture() {
                                  nullptr, 1, hidden_size, cfg.full_out_dim());
                 full_idx++;
             } else {
-                ops::linear_int4(q, act_qkv_raw_, act_normed_,
-                                 static_cast<const uint8_t*>(layer.in_proj_qkv.d_weights_int4),
-                                 static_cast<const sycl::half*>(layer.in_proj_qkv.d_scales),
-                                 nullptr, 1, cfg.linear_conv_channels, hidden_size);
-                ops::linear_int4(q, act_z_, act_normed_,
-                                 static_cast<const uint8_t*>(layer.in_proj_z.d_weights_int4),
-                                 static_cast<const sycl::half*>(layer.in_proj_z.d_scales),
-                                 nullptr, 1, cfg.linear_z_dim, hidden_size);
-                ops::linear_int4(q, act_b_, act_normed_,
-                                 static_cast<const uint8_t*>(layer.in_proj_b.d_weights_int4),
-                                 static_cast<const sycl::half*>(layer.in_proj_b.d_scales),
-                                 nullptr, 1, cfg.linear_b_dim, hidden_size);
-                ops::linear_int4(q, act_a_, act_normed_,
-                                 static_cast<const uint8_t*>(layer.in_proj_a.d_weights_int4),
-                                 static_cast<const sycl::half*>(layer.in_proj_a.d_scales),
-                                 nullptr, 1, cfg.linear_a_dim, hidden_size);
+                ops::FusedProjectionDesc la_projs[4] = {
+                    {act_qkv_raw_, static_cast<const uint8_t*>(layer.in_proj_qkv.d_weights_int4),
+                     static_cast<const sycl::half*>(layer.in_proj_qkv.d_scales), nullptr, cfg.linear_conv_channels},
+                    {act_z_, static_cast<const uint8_t*>(layer.in_proj_z.d_weights_int4),
+                     static_cast<const sycl::half*>(layer.in_proj_z.d_scales), nullptr, cfg.linear_z_dim},
+                    {act_b_, static_cast<const uint8_t*>(layer.in_proj_b.d_weights_int4),
+                     static_cast<const sycl::half*>(layer.in_proj_b.d_scales), nullptr, cfg.linear_b_dim},
+                    {act_a_, static_cast<const uint8_t*>(layer.in_proj_a.d_weights_int4),
+                     static_cast<const sycl::half*>(layer.in_proj_a.d_scales), nullptr, cfg.linear_a_dim}
+                };
+                ops::linear_int4_fused(q, act_normed_, la_projs, 4, 1, hidden_size);
 
                 causal_conv1d_silu(q, act_qkv_conv_, act_qkv_raw_, layer.d_conv1d_weight, 1,
                                    kv_cache_.conv_state(linear_idx));
@@ -235,16 +225,13 @@ bool DecodeGraph::capture() {
 
             ops::rmsnorm(q, act_normed_, act_x_, layer.d_post_attention_layernorm, 1, hidden_size);
 
-            ops::linear_int4(q, act_mlp_gate_, act_normed_,
-                             static_cast<const uint8_t*>(layer.gate_proj.d_weights_int4),
-                             static_cast<const sycl::half*>(layer.gate_proj.d_scales),
-                             nullptr, 1, intermediate_size, hidden_size);
-            ops::linear_int4(q, act_mlp_up_, act_normed_,
-                             static_cast<const uint8_t*>(layer.up_proj.d_weights_int4),
-                             static_cast<const sycl::half*>(layer.up_proj.d_scales),
-                             nullptr, 1, intermediate_size, hidden_size);
-
-            ops::swiglu(q, act_mlp_gate_, act_mlp_gate_, act_mlp_up_, intermediate_size);
+            // Fused MLP Gate + Up + SwiGLU: SiLU(gate) * up computed directly in sub-group registers
+            ops::mlp_gate_up_swiglu_int4(q, act_mlp_gate_, act_normed_,
+                                         static_cast<const uint8_t*>(layer.gate_proj.d_weights_int4),
+                                         static_cast<const sycl::half*>(layer.gate_proj.d_scales),
+                                         static_cast<const uint8_t*>(layer.up_proj.d_weights_int4),
+                                         static_cast<const sycl::half*>(layer.up_proj.d_scales),
+                                         1, intermediate_size, hidden_size);
 
             ops::linear_int4(q, act_proj_out_, act_mlp_gate_,
                              static_cast<const uint8_t*>(layer.down_proj.d_weights_int4),

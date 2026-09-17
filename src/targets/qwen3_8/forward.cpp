@@ -72,9 +72,8 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
     float* act_normed = static_cast<float*>(arena.allocate(seq_len * hidden_size * sizeof(float)));
     float* act_proj_out = static_cast<float*>(arena.allocate(seq_len * hidden_size * sizeof(float)));
 
-    // MLP buffers
+    // MLP buffers (act_mlp_gate holds both gate/up fused SwiGLU activation directly)
     float* act_mlp_gate = static_cast<float*>(arena.allocate(seq_len * intermediate_size * sizeof(float)));
-    float* act_mlp_up   = static_cast<float*>(arena.allocate(seq_len * intermediate_size * sizeof(float)));
 
     // Full Attention buffers
     float* act_q_gate   = static_cast<float*>(arena.allocate(seq_len * cfg.full_q_gate_dim() * sizeof(float)));
@@ -107,19 +106,16 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
 
         if (layer.layer_type == "full_attention") {
             // Full attention:
-            // Projections
-            ops::linear_int4(q, act_q_gate, act_normed,
-                                   static_cast<const uint8_t*>(layer.q_proj.d_weights_int4),
-                                   static_cast<const sycl::half*>(layer.q_proj.d_scales),
-                                   nullptr, seq_len, cfg.full_q_gate_dim(), hidden_size);
-            ops::linear_int4(q, act_k, act_normed,
-                                   static_cast<const uint8_t*>(layer.k_proj.d_weights_int4),
-                                   static_cast<const sycl::half*>(layer.k_proj.d_scales),
-                                   nullptr, seq_len, cfg.full_k_dim(), hidden_size);
-            ops::linear_int4(q, act_v, act_normed,
-                                   static_cast<const uint8_t*>(layer.v_proj.d_weights_int4),
-                                   static_cast<const sycl::half*>(layer.v_proj.d_scales),
-                                   nullptr, seq_len, cfg.full_v_dim(), hidden_size);
+            // Fused Q, K, V wide GEMV projection launch
+            ops::FusedProjectionDesc fa_projs[3] = {
+                {act_q_gate, static_cast<const uint8_t*>(layer.q_proj.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.q_proj.d_scales), nullptr, cfg.full_q_gate_dim()},
+                {act_k, static_cast<const uint8_t*>(layer.k_proj.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.k_proj.d_scales), nullptr, cfg.full_k_dim()},
+                {act_v, static_cast<const uint8_t*>(layer.v_proj.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.v_proj.d_scales), nullptr, cfg.full_v_dim()}
+            };
+            ops::linear_int4_fused(q, act_normed, fa_projs, 3, seq_len, hidden_size);
 
             int64_t num_q_heads = cfg.num_attention_heads;
             int64_t head_dim = cfg.head_dim;
@@ -181,22 +177,18 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
             full_idx++;
         } else {
             // Linear attention:
-            ops::linear_int4(q, act_qkv_raw, act_normed,
-                                   static_cast<const uint8_t*>(layer.in_proj_qkv.d_weights_int4),
-                                   static_cast<const sycl::half*>(layer.in_proj_qkv.d_scales),
-                                   nullptr, seq_len, cfg.linear_conv_channels, hidden_size);
-            ops::linear_int4(q, act_z, act_normed,
-                                   static_cast<const uint8_t*>(layer.in_proj_z.d_weights_int4),
-                                   static_cast<const sycl::half*>(layer.in_proj_z.d_scales),
-                                   nullptr, seq_len, cfg.linear_z_dim, hidden_size);
-            ops::linear_int4(q, act_b, act_normed,
-                                   static_cast<const uint8_t*>(layer.in_proj_b.d_weights_int4),
-                                   static_cast<const sycl::half*>(layer.in_proj_b.d_scales),
-                                   nullptr, seq_len, cfg.linear_b_dim, hidden_size);
-            ops::linear_int4(q, act_a, act_normed,
-                                   static_cast<const uint8_t*>(layer.in_proj_a.d_weights_int4),
-                                   static_cast<const sycl::half*>(layer.in_proj_a.d_scales),
-                                   nullptr, seq_len, cfg.linear_a_dim, hidden_size);
+            // Fused in_proj_qkv + in_proj_z + in_proj_b + in_proj_a wide GEMV launch
+            ops::FusedProjectionDesc la_projs[4] = {
+                {act_qkv_raw, static_cast<const uint8_t*>(layer.in_proj_qkv.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.in_proj_qkv.d_scales), nullptr, cfg.linear_conv_channels},
+                {act_z, static_cast<const uint8_t*>(layer.in_proj_z.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.in_proj_z.d_scales), nullptr, cfg.linear_z_dim},
+                {act_b, static_cast<const uint8_t*>(layer.in_proj_b.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.in_proj_b.d_scales), nullptr, cfg.linear_b_dim},
+                {act_a, static_cast<const uint8_t*>(layer.in_proj_a.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.in_proj_a.d_scales), nullptr, cfg.linear_a_dim}
+            };
+            ops::linear_int4_fused(q, act_normed, la_projs, 4, seq_len, hidden_size);
 
             // Stateful Causal Conv1d + SiLU
             causal_conv1d_silu(q, act_qkv_conv, act_qkv_raw, layer.d_conv1d_weight, seq_len,
@@ -221,17 +213,13 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
         // MLP
         ops::rmsnorm(q, act_normed, act_x, layer.d_post_attention_layernorm, seq_len, hidden_size);
 
-        ops::linear_int4(q, act_mlp_gate, act_normed,
-                               static_cast<const uint8_t*>(layer.gate_proj.d_weights_int4),
-                               static_cast<const sycl::half*>(layer.gate_proj.d_scales),
-                               nullptr, seq_len, intermediate_size, hidden_size);
-        ops::linear_int4(q, act_mlp_up, act_normed,
-                               static_cast<const uint8_t*>(layer.up_proj.d_weights_int4),
-                               static_cast<const sycl::half*>(layer.up_proj.d_scales),
-                               nullptr, seq_len, intermediate_size, hidden_size);
-
-        // SwiGLU: SiLU(gate) * up
-        ops::swiglu(q, act_mlp_gate, act_mlp_gate, act_mlp_up, seq_len * intermediate_size);
+        // Fused MLP Gate + Up + SwiGLU: SiLU(gate) * up computed directly in sub-group registers
+        ops::mlp_gate_up_swiglu_int4(q, act_mlp_gate, act_normed,
+                                     static_cast<const uint8_t*>(layer.gate_proj.d_weights_int4),
+                                     static_cast<const sycl::half*>(layer.gate_proj.d_scales),
+                                     static_cast<const uint8_t*>(layer.up_proj.d_weights_int4),
+                                     static_cast<const sycl::half*>(layer.up_proj.d_scales),
+                                     seq_len, intermediate_size, hidden_size);
 
         // Down projection
         ops::linear_int4(q, act_proj_out, act_mlp_gate,

@@ -265,6 +265,20 @@ target_link_libraries(profile_decode_step PRIVATE
 target_compile_options(profile_decode_step PRIVATE -fsycl)
 target_link_options(profile_decode_step PRIVATE -fsycl)
 
+add_executable(profile_projections
+    tools/parity/profile_projections.cpp
+)
+target_include_directories(profile_projections PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(profile_projections PRIVATE
+    xinfer_targets
+    xinfer_runtime
+)
+target_compile_options(profile_projections PRIVATE -fsycl)
+target_link_options(profile_projections PRIVATE -fsycl)
+
 add_executable(verify_pcie_and_memory
     tools/parity/verify_pcie_and_memory.cpp
 )

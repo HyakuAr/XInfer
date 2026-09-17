@@ -408,6 +408,214 @@ void test_linear_oracle(DeviceContext& ctx) {
     std::cout << "  XMX GEMM Max Abs Diff: " << diff_xmx.max_abs << std::endl;
     assert(diff_xmx.max_abs <= 1e-4f);
     std::cout << "  -> PASSED: XMX Systolic GEMM matches numerical oracle." << std::endl;
+
+    // -------------------------------------------------------------------------
+    // Test linear_int4_fused: 4 fused projections (e.g. QKV, Z, B, A shapes)
+    // -------------------------------------------------------------------------
+    std::cout << "  Testing linear_int4_fused (4 projections: N={128, 64, 48, 48}, K=512)..." << std::endl;
+    {
+        const int64_t fM = 1, fK = 512;
+        const int f_group_size = 128;
+        const int64_t f_num_groups = fK / f_group_size;
+        const std::vector<int64_t> fN = {128, 64, 48, 48};
+        const int num_projs = 4;
+
+        std::vector<float> h_fX(fM * fK);
+        for (auto& v : h_fX) v = dist(rng);
+
+        std::vector<std::vector<uint8_t>> h_fW(num_projs);
+        std::vector<std::vector<sycl::half>> h_fScales(num_projs);
+        std::vector<std::vector<float>> oracle_fY(num_projs);
+
+        for (int p = 0; p < num_projs; ++p) {
+            int64_t n_val = fN[p];
+            h_fW[p].resize(n_val * (fK / 2));
+            h_fScales[p].resize(n_val * f_num_groups);
+            oracle_fY[p].assign(fM * n_val, 0.0f);
+
+            for (size_t i = 0; i < h_fScales[p].size(); ++i) {
+                h_fScales[p][i] = sycl::half(0.015f + static_cast<float>((i + p) % 10) * 0.001f);
+            }
+            for (size_t i = 0; i < h_fW[p].size(); ++i) {
+                uint8_t low = (i + p + 3) & 0x0F;
+                uint8_t high = ((i + p + 7) & 0x0F) << 4;
+                h_fW[p][i] = low | high;
+            }
+
+            // Compute CPU oracle for projection p
+            for (int64_t m = 0; m < fM; ++m) {
+                for (int64_t n = 0; n < n_val; ++n) {
+                    double acc = 0.0;
+                    const float* rx = h_fX.data() + m * fK;
+                    const uint8_t* rw = h_fW[p].data() + n * (fK / 2);
+                    const sycl::half* rs = h_fScales[p].data() + n * f_num_groups;
+
+                    for (int64_t g = 0; g < f_num_groups; ++g) {
+                        float scale = static_cast<float>(rs[g]);
+                        int64_t base_k = g * f_group_size;
+                        int64_t base_byte = base_k / 2;
+
+                        for (int64_t b = 0; b < f_group_size / 2; ++b) {
+                            uint8_t byte_val = rw[base_byte + b];
+                            int8_t low = static_cast<int8_t>(byte_val & 0x0F);
+                            if (low >= 8) low = static_cast<int8_t>(low - 16);
+                            int8_t high = static_cast<int8_t>((byte_val >> 4) & 0x0F);
+                            if (high >= 8) high = static_cast<int8_t>(high - 16);
+
+                            int64_t k0 = base_k + 2 * b;
+                            int64_t k1 = k0 + 1;
+                            acc += static_cast<double>(rx[k0]) * (static_cast<double>(low) * static_cast<double>(scale));
+                            acc += static_cast<double>(rx[k1]) * (static_cast<double>(high) * static_cast<double>(scale));
+                        }
+                    }
+                    oracle_fY[p][m * n_val + n] = static_cast<float>(acc);
+                }
+            }
+        }
+
+        // Allocate device buffers
+        float* d_fX = static_cast<float*>(ctx.allocate_device(fM * fK * sizeof(float)));
+        ctx.copy_host_to_device(d_fX, h_fX.data(), fM * fK * sizeof(float));
+
+        std::vector<uint8_t*> d_fW(num_projs);
+        std::vector<sycl::half*> d_fScales(num_projs);
+        std::vector<float*> d_fY(num_projs);
+        FusedProjectionDesc descs[4];
+
+        for (int p = 0; p < num_projs; ++p) {
+            int64_t n_val = fN[p];
+            d_fW[p] = static_cast<uint8_t*>(ctx.allocate_device(n_val * (fK / 2)));
+            d_fScales[p] = static_cast<sycl::half*>(ctx.allocate_device(n_val * f_num_groups * sizeof(sycl::half)));
+            d_fY[p] = static_cast<float*>(ctx.allocate_device(fM * n_val * sizeof(float)));
+
+            ctx.copy_host_to_device(d_fW[p], h_fW[p].data(), n_val * (fK / 2));
+            ctx.copy_host_to_device(d_fScales[p], h_fScales[p].data(), n_val * f_num_groups * sizeof(sycl::half));
+
+            descs[p] = {d_fY[p], d_fW[p], d_fScales[p], nullptr, n_val};
+        }
+
+        linear_int4_fused(ctx.queue(), d_fX, descs, num_projs, fM, fK, f_group_size);
+
+        for (int p = 0; p < num_projs; ++p) {
+            int64_t n_val = fN[p];
+            std::vector<float> gpu_fY(fM * n_val);
+            ctx.copy_device_to_host(gpu_fY.data(), d_fY[p], fM * n_val * sizeof(float));
+            DiffStats diff_f = compare_buffers(oracle_fY[p].data(), gpu_fY.data(), fM * n_val);
+            std::cout << "    Projection " << p << " (N=" << n_val << ") Max Abs Diff: " << diff_f.max_abs << std::endl;
+            assert(diff_f.max_abs <= 1e-4f);
+        }
+        std::cout << "  -> PASSED: linear_int4_fused matches numerical oracle across all 4 projections." << std::endl;
+
+        ctx.free_device(d_fX);
+        for (int p = 0; p < num_projs; ++p) {
+            ctx.free_device(d_fW[p]);
+            ctx.free_device(d_fScales[p]);
+            ctx.free_device(d_fY[p]);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Test mlp_gate_up_swiglu_int4: Fused MLP Gate + Up + SwiGLU
+    // -------------------------------------------------------------------------
+    std::cout << "  Testing mlp_gate_up_swiglu_int4 (N=256, K=512, M=1)..." << std::endl;
+    {
+        const int64_t mlpM = 1, mlpK = 512, mlpN = 256;
+        const int mlp_group_size = 128;
+        const int64_t mlp_num_groups = mlpK / mlp_group_size;
+
+        std::vector<float> h_mX(mlpM * mlpK);
+        for (auto& v : h_mX) v = dist(rng);
+
+        std::vector<uint8_t> h_mWg(mlpN * (mlpK / 2)), h_mWu(mlpN * (mlpK / 2));
+        std::vector<sycl::half> h_mSg(mlpN * mlp_num_groups), h_mSu(mlpN * mlp_num_groups);
+
+        for (size_t i = 0; i < h_mSg.size(); ++i) {
+            h_mSg[i] = sycl::half(0.015f + static_cast<float>(i % 10) * 0.001f);
+            h_mSu[i] = sycl::half(0.020f + static_cast<float>((i + 3) % 10) * 0.001f);
+        }
+        for (size_t i = 0; i < h_mWg.size(); ++i) {
+            h_mWg[i] = ((i + 2) & 0x0F) | (((i + 5) & 0x0F) << 4);
+            h_mWu[i] = ((i + 4) & 0x0F) | (((i + 9) & 0x0F) << 4);
+        }
+
+        // Compute CPU oracle: silu(gate) * up
+        std::vector<float> oracle_swiglu(mlpM * mlpN, 0.0f);
+        for (int64_t m = 0; m < mlpM; ++m) {
+            for (int64_t n = 0; n < mlpN; ++n) {
+                double acc_g = 0.0, acc_u = 0.0;
+                const float* rx = h_mX.data() + m * mlpK;
+                const uint8_t* rwg = h_mWg.data() + n * (mlpK / 2);
+                const uint8_t* rwu = h_mWu.data() + n * (mlpK / 2);
+                const sycl::half* rsg = h_mSg.data() + n * mlp_num_groups;
+                const sycl::half* rsu = h_mSu.data() + n * mlp_num_groups;
+
+                for (int64_t g = 0; g < mlp_num_groups; ++g) {
+                    float scale_g = static_cast<float>(rsg[g]);
+                    float scale_u = static_cast<float>(rsu[g]);
+                    int64_t base_k = g * mlp_group_size;
+                    int64_t base_byte = base_k / 2;
+
+                    for (int64_t b = 0; b < mlp_group_size / 2; ++b) {
+                        uint8_t bg = rwg[base_byte + b];
+                        int8_t lg = static_cast<int8_t>(bg & 0x0F);
+                        if (lg >= 8) lg = static_cast<int8_t>(lg - 16);
+                        int8_t hg = static_cast<int8_t>((bg >> 4) & 0x0F);
+                        if (hg >= 8) hg = static_cast<int8_t>(hg - 16);
+
+                        uint8_t bu = rwu[base_byte + b];
+                        int8_t lu = static_cast<int8_t>(bu & 0x0F);
+                        if (lu >= 8) lu = static_cast<int8_t>(lu - 16);
+                        int8_t hu = static_cast<int8_t>((bu >> 4) & 0x0F);
+                        if (hu >= 8) hu = static_cast<int8_t>(hu - 16);
+
+                        int64_t k0 = base_k + 2 * b;
+                        int64_t k1 = k0 + 1;
+
+                        acc_g += static_cast<double>(rx[k0]) * (static_cast<double>(lg) * static_cast<double>(scale_g));
+                        acc_g += static_cast<double>(rx[k1]) * (static_cast<double>(hg) * static_cast<double>(scale_g));
+
+                        acc_u += static_cast<double>(rx[k0]) * (static_cast<double>(lu) * static_cast<double>(scale_u));
+                        acc_u += static_cast<double>(rx[k1]) * (static_cast<double>(hu) * static_cast<double>(scale_u));
+                    }
+                }
+                float gate_val = static_cast<float>(acc_g);
+                float up_val = static_cast<float>(acc_u);
+                float silu_g = gate_val / (1.0f + std::exp(-gate_val));
+                oracle_swiglu[m * mlpN + n] = silu_g * up_val;
+            }
+        }
+
+        // Allocate device buffers
+        float* d_mX = static_cast<float*>(ctx.allocate_device(mlpM * mlpK * sizeof(float)));
+        uint8_t* d_mWg = static_cast<uint8_t*>(ctx.allocate_device(mlpN * (mlpK / 2)));
+        uint8_t* d_mWu = static_cast<uint8_t*>(ctx.allocate_device(mlpN * (mlpK / 2)));
+        sycl::half* d_mSg = static_cast<sycl::half*>(ctx.allocate_device(mlpN * mlp_num_groups * sizeof(sycl::half)));
+        sycl::half* d_mSu = static_cast<sycl::half*>(ctx.allocate_device(mlpN * mlp_num_groups * sizeof(sycl::half)));
+        float* d_mY = static_cast<float*>(ctx.allocate_device(mlpM * mlpN * sizeof(float)));
+
+        ctx.copy_host_to_device(d_mX, h_mX.data(), mlpM * mlpK * sizeof(float));
+        ctx.copy_host_to_device(d_mWg, h_mWg.data(), mlpN * (mlpK / 2));
+        ctx.copy_host_to_device(d_mWu, h_mWu.data(), mlpN * (mlpK / 2));
+        ctx.copy_host_to_device(d_mSg, h_mSg.data(), mlpN * mlp_num_groups * sizeof(sycl::half));
+        ctx.copy_host_to_device(d_mSu, h_mSu.data(), mlpN * mlp_num_groups * sizeof(sycl::half));
+
+        mlp_gate_up_swiglu_int4(ctx.queue(), d_mY, d_mX, d_mWg, d_mSg, d_mWu, d_mSu, mlpM, mlpN, mlpK, mlp_group_size);
+
+        std::vector<float> gpu_mY(mlpM * mlpN);
+        ctx.copy_device_to_host(gpu_mY.data(), d_mY, mlpM * mlpN * sizeof(float));
+
+        DiffStats diff_mlp = compare_buffers(oracle_swiglu.data(), gpu_mY.data(), mlpM * mlpN);
+        std::cout << "  Fused MLP SwiGLU Max Abs Diff: " << diff_mlp.max_abs << " | Mean Abs: " << diff_mlp.mean_abs << std::endl;
+        assert(diff_mlp.max_abs <= 1e-4f);
+        std::cout << "  -> PASSED: mlp_gate_up_swiglu_int4 matches numerical oracle." << std::endl;
+
+        ctx.free_device(d_mX);
+        ctx.free_device(d_mWg);
+        ctx.free_device(d_mWu);
+        ctx.free_device(d_mSg);
+        ctx.free_device(d_mSu);
+        ctx.free_device(d_mY);
+    }
 }
 
 // -----------------------------------------------------------------------------

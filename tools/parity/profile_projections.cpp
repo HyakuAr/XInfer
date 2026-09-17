@@ -319,6 +319,115 @@ int main(int argc, char** argv) {
     std::cout << "Aggregate Weight Memory Bandwidth:   " << aggregate_weight_bw << " GB/s" << std::endl;
     std::cout << "Aggregate Total Bus Traffic Bandwidth:" << aggregate_bw << " GB/s" << std::endl;
 
+    // =========================================================================
+    // Fused Projections Benchmark: Directly measuring the fused kernels on B60
+    // =========================================================================
+    std::cout << "\n=========================================================================================================================" << std::endl;
+    std::cout << "                              FUSED PROJECTION ACCELERATION ON INTEL ARC PRO B60 (M=1 DECODE)                            " << std::endl;
+    std::cout << "=========================================================================================================================" << std::endl;
+
+    std::vector<sycl::event> events_fa_fused;
+    events_fa_fused.reserve(cfg.num_full_layers());
+    for (size_t l = 0; l < layers.size(); ++l) {
+        const auto& layer = layers[l];
+        if (layer.layer_type == "full_attention") {
+            ops::FusedProjectionDesc fa_projs[3] = {
+                {act_q_gate, static_cast<const uint8_t*>(layer.q_proj.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.q_proj.d_scales), nullptr, cfg.full_q_gate_dim()},
+                {act_k, static_cast<const uint8_t*>(layer.k_proj.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.k_proj.d_scales), nullptr, cfg.full_k_dim()},
+                {act_v, static_cast<const uint8_t*>(layer.v_proj.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.v_proj.d_scales), nullptr, cfg.full_v_dim()}
+            };
+            events_fa_fused.push_back(
+                ops::linear_int4_fused(q, act_normed, fa_projs, 3, 1, hidden_size)
+            );
+        }
+    }
+
+    std::vector<sycl::event> events_la_fused;
+    events_la_fused.reserve(cfg.num_linear_layers());
+    for (size_t l = 0; l < layers.size(); ++l) {
+        const auto& layer = layers[l];
+        if (layer.layer_type != "full_attention") {
+            ops::FusedProjectionDesc la_projs[4] = {
+                {act_qkv_raw, static_cast<const uint8_t*>(layer.in_proj_qkv.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.in_proj_qkv.d_scales), nullptr, cfg.linear_conv_channels},
+                {act_z, static_cast<const uint8_t*>(layer.in_proj_z.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.in_proj_z.d_scales), nullptr, cfg.linear_z_dim},
+                {act_b, static_cast<const uint8_t*>(layer.in_proj_b.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.in_proj_b.d_scales), nullptr, cfg.linear_b_dim},
+                {act_a, static_cast<const uint8_t*>(layer.in_proj_a.d_weights_int4),
+                 static_cast<const sycl::half*>(layer.in_proj_a.d_scales), nullptr, cfg.linear_a_dim}
+            };
+            events_la_fused.push_back(
+                ops::linear_int4_fused(q, act_normed, la_projs, 4, 1, hidden_size)
+            );
+        }
+    }
+
+    std::vector<sycl::event> events_mlp_fused;
+    events_mlp_fused.reserve(cfg.num_hidden_layers);
+    for (size_t l = 0; l < layers.size(); ++l) {
+        const auto& layer = layers[l];
+        events_mlp_fused.push_back(
+            ops::mlp_gate_up_swiglu_int4(q, act_mlp_gate, act_normed,
+                                         static_cast<const uint8_t*>(layer.gate_proj.d_weights_int4),
+                                         static_cast<const sycl::half*>(layer.gate_proj.d_scales),
+                                         static_cast<const uint8_t*>(layer.up_proj.d_weights_int4),
+                                         static_cast<const sycl::half*>(layer.up_proj.d_scales),
+                                         1, intermediate_size, hidden_size)
+        );
+    }
+    q.wait();
+
+    auto calc_time = [](const std::vector<sycl::event>& evs) {
+        double ms = 0.0;
+        for (const auto& ev : evs) {
+            uint64_t s = ev.get_profiling_info<sycl::info::event_profiling::command_start>();
+            uint64_t e = ev.get_profiling_info<sycl::info::event_profiling::command_end>();
+            ms += static_cast<double>(e - s) * 1e-6;
+        }
+        return ms;
+    };
+
+    double fa_fused_ms = calc_time(events_fa_fused);
+    double la_fused_ms = calc_time(events_la_fused);
+    double mlp_fused_ms = calc_time(events_mlp_fused);
+
+    double fa_unfused_ms = projs[P_FA_Q].total_time_ms + projs[P_FA_K].total_time_ms + projs[P_FA_V].total_time_ms;
+    double la_unfused_ms = projs[P_LA_QKV].total_time_ms + projs[P_LA_Z].total_time_ms + projs[P_LA_B].total_time_ms + projs[P_LA_A].total_time_ms;
+    double mlp_unfused_ms = projs[P_MLP_GATE].total_time_ms + projs[P_MLP_UP].total_time_ms;
+
+    std::cout << std::left << std::setw(32) << "Kernel Group"
+              << std::right << std::setw(16) << "Unfused (ms)"
+              << std::setw(16) << "Fused (ms)"
+              << std::setw(14) << "Time Saved"
+              << std::setw(14) << "Speedup"
+              << std::setw(20) << "Workgroups Launched" << std::endl;
+    std::cout << "-------------------------------------------------------------------------------------------------------------------------" << std::endl;
+
+    auto print_comp = [](const std::string& name, double unfused, double fused, const std::string& wg_info) {
+        double saved = unfused - fused;
+        double spd = (fused > 0.0) ? (unfused / fused) : 1.0;
+        std::cout << std::left << std::setw(32) << name
+                  << std::right << std::fixed << std::setprecision(2)
+                  << std::setw(16) << unfused
+                  << std::setw(16) << fused
+                  << std::setw(12) << saved << " ms"
+                  << std::setprecision(2) << std::setw(12) << spd << "x"
+                  << std::setw(20) << wg_info << std::endl;
+    };
+
+    print_comp("Full-Attn Q+K+V (16 layers)", fa_unfused_ms, fa_fused_ms, "1792 WGs (was 16 WGs on K/V)");
+    print_comp("Linear-Attn QKV+Z+B+A (48 layers)", la_unfused_ms, la_fused_ms, "2060 WGs (was 6 WGs on B/A)");
+    print_comp("MLP Gate+Up+SwiGLU (64 layers)", mlp_unfused_ms, mlp_fused_ms, "4352 WGs (1 launch vs 3)");
+    std::cout << "-------------------------------------------------------------------------------------------------------------------------" << std::endl;
+    double total_unfused = fa_unfused_ms + la_unfused_ms + mlp_unfused_ms;
+    double total_fused = fa_fused_ms + la_fused_ms + mlp_fused_ms;
+    print_comp("TOTAL FUSED KERNELS", total_unfused, total_fused, "Full GPU Occupancy");
+    std::cout << "=========================================================================================================================\n" << std::endl;
+
     sycl::free(act_x, q);
     sycl::free(act_normed, q);
     sycl::free(act_proj_out, q);
