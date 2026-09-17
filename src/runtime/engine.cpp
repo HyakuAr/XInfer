@@ -56,7 +56,21 @@ public:
             }
         }
 
-        // Fallback to local tokenizer.json if not embedded
+        // Load chat template from container artifact (chat_template.jinja)
+        if (reader.has_section("chat_template.jinja")) {
+            std::vector<uint8_t> tmpl_data;
+            if (reader.read_section("chat_template.jinja", tmpl_data, error_msg)) {
+                std::string tmpl_err;
+                if (tokenizer_.load_chat_template_buffer(tmpl_data.data(), tmpl_data.size(), &tmpl_err)) {
+                    std::cout << "[xinfer::Engine] Loaded real chat template from artifact ("
+                              << tmpl_data.size() << " bytes)" << std::endl;
+                } else {
+                    std::cerr << "[xinfer::Engine] Warning: Failed to parse embedded chat template: " << tmpl_err << std::endl;
+                }
+            }
+        }
+
+        // Fallback to local tokenizer.json / chat_template.jinja if not embedded
         if (!tokenizer_.is_loaded()) {
             std::string tok_err;
             if (tokenizer_.load_from_file(R"(H:\Models\Qwen3.8-27B\tokenizer.json)", &tok_err)) {
@@ -66,6 +80,12 @@ public:
             } else {
                 if (error_msg) *error_msg = "Failed to load tokenizer from artifact or fallback path: " + tok_err;
                 return false;
+            }
+        }
+        if (!tokenizer_.has_chat_template()) {
+            std::string tmpl_err;
+            if (tokenizer_.load_chat_template_file(R"(H:\Models\Qwen3.8-27B\chat_template.jinja)", &tmpl_err)) {
+                std::cout << "[xinfer::Engine] Loaded fallback chat template from local checkpoint" << std::endl;
             }
         }
 
@@ -139,9 +159,23 @@ public:
         return kv_cache_ ? kv_cache_->max_seq_len() : config_.max_seq_len;
     }
 
+    std::string apply_chat_template(const std::vector<ChatMessage>& messages) const {
+        return tokenizer_.apply_chat_template(messages);
+    }
+
+    std::string apply_chat_template(const std::string& user_prompt, const std::string& system_prompt = "") const {
+        return tokenizer_.apply_chat_template(user_prompt, system_prompt);
+    }
+
     size_t count_tokens(const std::string& text, bool apply_chat_template) const {
         if (!tokenizer_.is_loaded()) return 0;
         std::string input = apply_chat_template ? tokenizer_.apply_chat_template(text) : text;
+        return tokenizer_.encode(input).size();
+    }
+
+    size_t count_tokens(const std::vector<ChatMessage>& messages) const {
+        if (!tokenizer_.is_loaded()) return 0;
+        std::string input = tokenizer_.apply_chat_template(messages);
         return tokenizer_.encode(input).size();
     }
 
@@ -400,8 +434,20 @@ int64_t Engine::im_end_token_id() const noexcept {
     return impl_->im_end_token_id();
 }
 
+std::string Engine::apply_chat_template(const std::vector<ChatMessage>& messages) const {
+    return impl_->apply_chat_template(messages);
+}
+
+std::string Engine::apply_chat_template(const std::string& user_prompt, const std::string& system_prompt) const {
+    return impl_->apply_chat_template(user_prompt, system_prompt);
+}
+
 size_t Engine::count_tokens(const std::string& text, bool apply_chat_template) const {
     return impl_->count_tokens(text, apply_chat_template);
+}
+
+size_t Engine::count_tokens(const std::vector<ChatMessage>& messages) const {
+    return impl_->count_tokens(messages);
 }
 
 bool Engine::validate_tokens(size_t prompt_tokens, int max_new_tokens, std::string* error_msg) const {

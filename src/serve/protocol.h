@@ -1,5 +1,6 @@
 #pragma once
 
+#include "xinfer/engine.h"
 #include <string>
 #include <vector>
 #include <optional>
@@ -30,10 +31,7 @@ struct JsonValue {
 bool parse_json(std::string_view input, JsonValue& out, std::string& error_msg);
 void escape_json_string(std::string& out, std::string_view str);
 
-struct ChatMessage {
-    std::string role;    // "system", "user", "assistant"
-    std::string content;
-};
+using xinfer::ChatMessage;
 
 struct ChatCompletionRequest {
     std::string model{"qwen3.8-27b"};
@@ -41,9 +39,6 @@ struct ChatCompletionRequest {
     int max_tokens{256};
     float temperature{0.0f};
     bool stream{false};
-
-    // Formats conversation messages into standard Qwen chat template prompt
-    std::string format_prompt() const;
 };
 
 struct ChatChoice {

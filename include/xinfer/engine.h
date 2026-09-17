@@ -8,6 +8,12 @@
 
 namespace xinfer {
 
+struct ChatMessage {
+    std::string role;              // "system", "user", "assistant", "tool"
+    std::string content;
+    std::string reasoning_content; // optional reasoning content for assistant messages
+};
+
 struct GenerationConfig {
     int     max_new_tokens{256};
     float   temperature{0.0f};           // 0.0 = greedy argmax sampling
@@ -66,8 +72,13 @@ public:
     int64_t eos_token_id() const noexcept;
     int64_t im_end_token_id() const noexcept;
 
-    // Tokenize text and return token count without generating
+    // Format messages with the loaded model's real chat template (chat_template.jinja)
+    std::string apply_chat_template(const std::vector<ChatMessage>& messages) const;
+    std::string apply_chat_template(const std::string& user_prompt, const std::string& system_prompt = "") const;
+
+    // Tokenize text or messages and return token count without generating
     size_t count_tokens(const std::string& text, bool apply_chat_template = true) const;
+    size_t count_tokens(const std::vector<ChatMessage>& messages) const;
 
     // Validate if prompt tokens and generation config fit within max_seq_len
     bool validate_tokens(size_t prompt_tokens, int max_new_tokens, std::string* error_msg = nullptr) const;

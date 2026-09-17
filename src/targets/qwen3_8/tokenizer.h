@@ -1,5 +1,6 @@
 #pragma once
 
+#include "chat_template.h"
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -17,8 +18,15 @@ public:
     // Load tokenizer from tokenizer.json raw buffer (e.g. from .xinfer tokenizer.data section)
     bool load_from_json_buffer(const void* data, size_t size, std::string* error_msg = nullptr);
 
-    // Load tokenizer directly from tokenizer.json or checkpoint directory containing tokenizer.json / config.json
+    // Load tokenizer directly from tokenizer.json or checkpoint directory containing tokenizer.json / config.json / chat_template.jinja
     bool load_from_file(const std::string& path, std::string* error_msg = nullptr);
+
+    // Load chat template from buffer or file (e.g. from .xinfer chat_template.jinja section)
+    bool load_chat_template_buffer(const void* data, size_t size, std::string* error_msg = nullptr);
+    bool load_chat_template_file(const std::string& path, std::string* error_msg = nullptr);
+    bool has_chat_template() const noexcept { return chat_template_.is_loaded(); }
+    const QwenChatTemplate& chat_template() const noexcept { return chat_template_; }
+    QwenChatTemplate& chat_template() noexcept { return chat_template_; }
 
     // Validate tokenizer special tokens against checkpoint config.json (buffer or path)
     bool validate_against_config_buffer(const void* data, size_t size, std::string* error_msg = nullptr);
@@ -33,9 +41,14 @@ public:
     // Decode list of token IDs to full string
     std::string decode(const std::vector<int64_t>& token_ids) const;
 
-    // Format user prompt with Qwen chat template (<|im_start|>system...<|im_start|>user...<|im_start|>assistant\n)
+    // Format conversation messages with real loaded chat template (chat_template.jinja)
+    std::string apply_chat_template(const std::vector<ChatMessage>& messages,
+                                    const ChatTemplateOptions& options = {}) const;
+
+    // Single prompt convenience overload
     std::string apply_chat_template(const std::string& user_prompt,
-                                    const std::string& system_prompt = "You are a helpful assistant.") const;
+                                    const std::string& system_prompt = "",
+                                    const ChatTemplateOptions& options = {}) const;
 
     bool is_loaded() const noexcept { return !vocab_.empty() && !bpe_ranks_.empty(); }
     size_t vocab_size() const noexcept { return vocab_.size(); }
@@ -69,6 +82,8 @@ private:
     int64_t im_end_token_id_{-1};
     int64_t think_start_token_id_{-1};
     int64_t think_end_token_id_{-1};
+
+    QwenChatTemplate chat_template_;
 };
 
 } // namespace xinfer::targets::qwen3_8

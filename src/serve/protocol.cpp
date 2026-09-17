@@ -296,15 +296,6 @@ bool parse_json(std::string_view input, JsonValue& out, std::string& error_msg) 
     return parser.parse(out, error_msg);
 }
 
-std::string ChatCompletionRequest::format_prompt() const {
-    std::string prompt;
-    for (const auto& msg : messages) {
-        prompt += "<|im_start|>" + msg.role + "\n" + msg.content + "<|im_end|>\n";
-    }
-    prompt += "<|im_start|>assistant\n";
-    return prompt;
-}
-
 std::string generate_completion_id() {
     static thread_local std::mt19937_64 rng(std::random_device{}());
     uint64_t r1 = rng();

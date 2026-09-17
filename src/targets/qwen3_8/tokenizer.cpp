@@ -667,6 +667,12 @@ bool QwenTokenizer::load_from_file(const std::string& path, std::string* error_m
         }
     }
 
+    // Check sibling chat_template.jinja if present
+    std::filesystem::path jinja_file = dir / "chat_template.jinja";
+    if (std::filesystem::exists(jinja_file)) {
+        chat_template_.load_from_file(jinja_file.string());
+    }
+
     return true;
 }
 
@@ -856,13 +862,23 @@ std::string QwenTokenizer::decode(const std::vector<int64_t>& token_ids) const {
     return text;
 }
 
+bool QwenTokenizer::load_chat_template_buffer(const void* data, size_t size, std::string* error_msg) {
+    return chat_template_.load_from_buffer(data, size, error_msg);
+}
+
+bool QwenTokenizer::load_chat_template_file(const std::string& path, std::string* error_msg) {
+    return chat_template_.load_from_file(path, error_msg);
+}
+
+std::string QwenTokenizer::apply_chat_template(const std::vector<ChatMessage>& messages,
+                                              const ChatTemplateOptions& options) const {
+    return chat_template_.render(messages, options);
+}
+
 std::string QwenTokenizer::apply_chat_template(const std::string& user_prompt,
-                                              const std::string& system_prompt) const {
-    std::string formatted;
-    formatted += "<|im_start|>system\n" + system_prompt + "<|im_end|>\n";
-    formatted += "<|im_start|>user\n" + user_prompt + "<|im_end|>\n";
-    formatted += "<|im_start|>assistant\n";
-    return formatted;
+                                              const std::string& system_prompt,
+                                              const ChatTemplateOptions& options) const {
+    return chat_template_.render(user_prompt, system_prompt, options);
 }
 
 } // namespace xinfer::targets::qwen3_8

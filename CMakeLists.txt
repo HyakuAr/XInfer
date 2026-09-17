@@ -120,6 +120,7 @@ add_test(NAME OpsOracleTest COMMAND test_ops_oracle)
 
 # Milestone 5: Minimal Engine (End-to-End Single-Request Decode)
 add_library(xinfer_targets STATIC
+    src/targets/qwen3_8/chat_template.cpp
     src/targets/qwen3_8/tokenizer.cpp
     src/targets/qwen3_8/linear_attn.cpp
     src/targets/qwen3_8/forward.cpp
@@ -190,6 +191,22 @@ target_compile_options(test_tokenizer_bpe PRIVATE -fsycl)
 target_link_options(test_tokenizer_bpe PRIVATE -fsycl)
 
 add_test(NAME TokenizerBPETest COMMAND test_tokenizer_bpe)
+
+add_executable(test_chat_template
+    tests/test_chat_template.cpp
+)
+target_include_directories(test_chat_template PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(test_chat_template PRIVATE
+    xinfer_targets
+    xinfer_runtime
+)
+target_compile_options(test_chat_template PRIVATE -fsycl)
+target_link_options(test_chat_template PRIVATE -fsycl)
+
+add_test(NAME ChatTemplateTest COMMAND test_chat_template)
 
 # Milestone 9: OpenAI-Compatible HTTP Serving
 add_library(xinfer_serve STATIC

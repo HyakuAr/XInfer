@@ -33,10 +33,7 @@ void test_parse_valid_single_turn_request() {
     assert(std::abs(req.temperature - 0.7f) < 1e-4);
     assert(!req.stream);
 
-    std::string prompt = req.format_prompt();
-    std::string expected_prompt = "<|im_start|>user\nHello world!<|im_end|>\n<|im_start|>assistant\n";
-    assert(prompt == expected_prompt);
-    std::cout << "  -> PASSED: Single-turn request parsed and formatted." << std::endl;
+    std::cout << "  -> PASSED: Single-turn request parsed." << std::endl;
 }
 
 void test_parse_multi_turn_with_system() {
@@ -69,11 +66,7 @@ void test_parse_multi_turn_with_system() {
     assert(req.max_tokens == 128);
     assert(req.stream);
 
-    std::string prompt = req.format_prompt();
-    assert(prompt.find("<|im_start|>system\nBe concise.<|im_end|>\n") != std::string::npos);
-    assert(prompt.find("<|im_start|>assistant\n4.<|im_end|>\n") != std::string::npos);
-    assert(prompt.rfind("<|im_start|>assistant\n") == prompt.size() - 22);
-    std::cout << "  -> PASSED: Multi-turn prompt properly formatted." << std::endl;
+    std::cout << "  -> PASSED: Multi-turn request parsed." << std::endl;
 }
 
 void test_parse_invalid_requests() {

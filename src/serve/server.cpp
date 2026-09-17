@@ -338,11 +338,11 @@ void HttpServer::handle_client(uintptr_t client_socket) {
         return;
     }
 
-    std::string prompt = req.format_prompt();
+    std::string prompt = engine_.apply_chat_template(req.messages);
     GenerationConfig gen_cfg;
     gen_cfg.max_new_tokens = req.max_tokens;
     gen_cfg.temperature = req.temperature;
-    gen_cfg.apply_chat_template = false; // already formatted via format_prompt()
+    gen_cfg.apply_chat_template = false; // already formatted via engine's real chat template
 
     // Validate prompt tokens and max_tokens against model context length
     size_t prompt_tokens = engine_.count_tokens(prompt, false);
