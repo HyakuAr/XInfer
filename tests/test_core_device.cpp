@@ -143,6 +143,33 @@ void test_device_arena_allocator() {
 
     std::cout << "  Peak activation memory used: " << (arena.peak_allocated_bytes() / 1024) << " KB" << std::endl;
     std::cout << "  -> PASSED: DeviceArena zero-allocation decode reuse verified." << std::endl;
+
+    // 3. Test persistent buffer outside the bump arena (for decode fallback d_logits)
+    std::cout << "  Testing persistent buffer outside bump arena..." << std::endl;
+    void* pbuf1 = arena.persistent_buffer(1024 * 1024);
+    assert(pbuf1 != nullptr);
+    assert((reinterpret_cast<uintptr_t>(pbuf1) % 64) == 0);
+
+    // Verify pbuf1 does not alias with the bump arena [base_ptr, base_ptr + capacity)
+    uintptr_t p_addr = reinterpret_cast<uintptr_t>(pbuf1);
+    uintptr_t base_addr = reinterpret_cast<uintptr_t>(arena.base_ptr());
+    assert(p_addr < base_addr || p_addr >= (base_addr + arena.capacity()));
+
+    // Verify address stability across multiple calls
+    void* pbuf2 = arena.persistent_buffer(1024 * 1024);
+    assert(pbuf1 == pbuf2);
+
+    // Verify persistence across arena reset()
+    arena.reset();
+    assert(arena.allocated_bytes() == 0);
+    void* pbuf3 = arena.persistent_buffer();
+    assert(pbuf1 == pbuf3);
+
+    // Verify bump allocations after reset do not alias persistent buffer
+    TensorView act_after_reset = arena.allocate_tensor(TensorShape{1, 5120}, DataType::Float32);
+    assert(act_after_reset.data() != pbuf3);
+    assert(reinterpret_cast<uintptr_t>(act_after_reset.data()) != reinterpret_cast<uintptr_t>(pbuf3));
+    std::cout << "  -> PASSED: DeviceArena persistent buffer outside arena verified." << std::endl;
 }
 
 void test_level_zero_command_list() {

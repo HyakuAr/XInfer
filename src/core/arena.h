@@ -7,6 +7,7 @@
 #include <memory>
 #include <stdexcept>
 #include <algorithm>
+#include <vector>
 
 namespace xinfer::core {
 
@@ -30,6 +31,15 @@ public:
     // Allocate a TensorView backed by the arena buffer
     TensorView allocate_tensor(TensorShape shape, DataType dtype, size_t alignment = 0);
 
+    // Allocate raw device memory outside the bump arena that persists across reset()
+    // calls and is freed when the DeviceArena is destroyed.
+    void* allocate_persistent(size_t bytes, size_t alignment = 0);
+
+    // Get or allocate a dedicated persistent buffer (e.g. for fallback logits) outside the bump arena.
+    // Preserves address stability across decode steps and survives reset().
+    void* persistent_buffer(size_t bytes = 0, size_t alignment = 0);
+    const void* persistent_buffer() const noexcept { return persistent_buffer_; }
+
     // Reset the bump pointer to 0 for reuse in the next decode step without deallocating USM
     void reset() noexcept;
 
@@ -48,6 +58,8 @@ private:
     size_t offset_{0};
     size_t peak_offset_{0};
     size_t default_alignment_{DEFAULT_ALIGNMENT};
+    std::vector<void*> persistent_allocations_;
+    void* persistent_buffer_{nullptr};
 };
 
 } // namespace xinfer::core

@@ -42,7 +42,8 @@ int64_t decode_step(std::shared_ptr<core::DeviceContext> ctx,
                     core::DeviceArena& arena,
                     const qwen3_8_27b::LoadedModel& model,
                     core::KVCache& kv_cache,
-                    int64_t input_token_id);
+                    int64_t input_token_id,
+                    float* d_logits = nullptr);
 
 // Legacy forward pass without persistent cache (M5 baseline)
 int64_t forward_next_token(std::shared_ptr<core::DeviceContext> ctx,

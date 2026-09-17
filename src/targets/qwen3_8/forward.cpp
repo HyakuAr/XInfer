@@ -259,7 +259,7 @@ int64_t prefill_prompt(std::shared_ptr<core::DeviceContext> ctx,
     kv_cache.clear();
 
     constexpr int64_t vocab_size = 248320;
-    float* d_logits = static_cast<float*>(arena.allocate(vocab_size * sizeof(float)));
+    float* d_logits = static_cast<float*>(arena.persistent_buffer(vocab_size * sizeof(float)));
 
     size_t total_tokens = prompt_tokens.size();
     size_t offset = 0;
@@ -290,7 +290,8 @@ int64_t decode_step(std::shared_ptr<core::DeviceContext> ctx,
                     core::DeviceArena& arena,
                     const qwen3_8_27b::LoadedModel& model,
                     core::KVCache& kv_cache,
-                    int64_t input_token_id) {
+                    int64_t input_token_id,
+                    float* d_logits) {
     if (kv_cache.current_seq_len() >= kv_cache.max_seq_len()) {
         std::cerr << "[xinfer::qwen3_8] Error: decode_step called with current_seq_len ("
                   << kv_cache.current_seq_len() << ") >= max_seq_len ("
@@ -299,7 +300,9 @@ int64_t decode_step(std::shared_ptr<core::DeviceContext> ctx,
     }
 
     constexpr int64_t vocab_size = 248320;
-    float* d_logits = static_cast<float*>(arena.allocate(vocab_size * sizeof(float)));
+    if (!d_logits) {
+        d_logits = static_cast<float*>(arena.persistent_buffer(vocab_size * sizeof(float)));
+    }
 
     int64_t cur_pos = static_cast<int64_t>(kv_cache.current_seq_len());
 

@@ -15,9 +15,18 @@ DeviceArena::DeviceArena(std::shared_ptr<DeviceContext> ctx, size_t capacity_byt
 }
 
 DeviceArena::~DeviceArena() {
-    if (ctx_ && base_ptr_) {
-        ctx_->free_device(base_ptr_);
-        base_ptr_ = nullptr;
+    if (ctx_) {
+        if (base_ptr_) {
+            ctx_->free_device(base_ptr_);
+            base_ptr_ = nullptr;
+        }
+        for (void* ptr : persistent_allocations_) {
+            if (ptr) {
+                ctx_->free_device(ptr);
+            }
+        }
+        persistent_allocations_.clear();
+        persistent_buffer_ = nullptr;
     }
 }
 
@@ -27,17 +36,27 @@ DeviceArena::DeviceArena(DeviceArena&& other) noexcept
       capacity_(other.capacity_),
       offset_(other.offset_),
       peak_offset_(other.peak_offset_),
-      default_alignment_(other.default_alignment_) {
+      default_alignment_(other.default_alignment_),
+      persistent_allocations_(std::move(other.persistent_allocations_)),
+      persistent_buffer_(other.persistent_buffer_) {
     other.base_ptr_ = nullptr;
     other.capacity_ = 0;
     other.offset_ = 0;
     other.peak_offset_ = 0;
+    other.persistent_buffer_ = nullptr;
 }
 
 DeviceArena& DeviceArena::operator=(DeviceArena&& other) noexcept {
     if (this != &other) {
-        if (ctx_ && base_ptr_) {
-            ctx_->free_device(base_ptr_);
+        if (ctx_) {
+            if (base_ptr_) {
+                ctx_->free_device(base_ptr_);
+            }
+            for (void* ptr : persistent_allocations_) {
+                if (ptr) {
+                    ctx_->free_device(ptr);
+                }
+            }
         }
         ctx_ = std::move(other.ctx_);
         base_ptr_ = other.base_ptr_;
@@ -45,11 +64,14 @@ DeviceArena& DeviceArena::operator=(DeviceArena&& other) noexcept {
         offset_ = other.offset_;
         peak_offset_ = other.peak_offset_;
         default_alignment_ = other.default_alignment_;
+        persistent_allocations_ = std::move(other.persistent_allocations_);
+        persistent_buffer_ = other.persistent_buffer_;
 
         other.base_ptr_ = nullptr;
         other.capacity_ = 0;
         other.offset_ = 0;
         other.peak_offset_ = 0;
+        other.persistent_buffer_ = nullptr;
     }
     return *this;
 }
@@ -76,6 +98,26 @@ TensorView DeviceArena::allocate_tensor(TensorShape shape, DataType dtype, size_
     size_t bytes = compute_tensor_bytes(shape.numel(), dtype);
     void* ptr = allocate(bytes, alignment);
     return TensorView(ptr, std::move(shape), dtype);
+}
+
+void* DeviceArena::allocate_persistent(size_t bytes, size_t alignment) {
+    if (bytes == 0) return nullptr;
+    if (!ctx_) throw std::invalid_argument("DeviceArena requires a valid DeviceContext");
+
+    size_t align = (alignment > 0) ? alignment : default_alignment_;
+    void* ptr = ctx_->allocate_device(bytes, align);
+    if (!ptr) {
+        throw std::bad_alloc();
+    }
+    persistent_allocations_.push_back(ptr);
+    return ptr;
+}
+
+void* DeviceArena::persistent_buffer(size_t bytes, size_t alignment) {
+    if (!persistent_buffer_ && bytes > 0) {
+        persistent_buffer_ = allocate_persistent(bytes, alignment);
+    }
+    return persistent_buffer_;
 }
 
 void DeviceArena::reset() noexcept {
