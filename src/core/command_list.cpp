@@ -1,10 +1,27 @@
 #include "command_list.h"
-#include <windows.h>
 #include <stdexcept>
 #include <iostream>
+#include <string>
 
-namespace xinfer::core {
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
+// Grounding source: docs/vendor/level-zero-command-lists.md
+// Level Zero Specification (v1.18+):
+// - Regular deferred command lists (record once, replay many times)
+// - Descriptors: ze_command_list_desc_t, ze_command_queue_desc_t, ze_fence_desc_t
+#if __has_include(<level_zero/ze_api.h>)
+#include <level_zero/ze_api.h>
+#else
 namespace {
 
 typedef uint32_t ze_result_t;
@@ -41,6 +58,9 @@ struct ze_fence_desc_t {
 #pragma pack(pop)
 
 } // anonymous namespace
+#endif
+
+namespace xinfer::core {
 
 struct LevelZeroCommandList::L0DispatchTable {
     ze_result_t (*pfnCommandListCreate)(void*, void*, const ze_command_list_desc_t*, void**){nullptr};
@@ -75,7 +95,12 @@ LevelZeroCommandList::~LevelZeroCommandList() {
         if (cmd_queue_ && fn_->pfnCommandQueueDestroy) fn_->pfnCommandQueueDestroy(cmd_queue_);
     }
     if (h_module_) {
+#ifdef _WIN32
         FreeLibrary(static_cast<HMODULE>(h_module_));
+#else
+        dlclose(h_module_);
+#endif
+        h_module_ = nullptr;
     }
 }
 
@@ -102,7 +127,12 @@ LevelZeroCommandList& LevelZeroCommandList::operator=(LevelZeroCommandList&& oth
             if (cmd_queue_ && fn_->pfnCommandQueueDestroy) fn_->pfnCommandQueueDestroy(cmd_queue_);
         }
         if (h_module_) {
+#ifdef _WIN32
             FreeLibrary(static_cast<HMODULE>(h_module_));
+#else
+            dlclose(h_module_);
+#endif
+            h_module_ = nullptr;
         }
 
         ctx_ = std::move(other.ctx_);
@@ -127,14 +157,39 @@ void LevelZeroCommandList::init() {
         throw std::runtime_error("LevelZeroCommandList requires a device context with Level Zero backend");
     }
 
+#ifdef _WIN32
     HMODULE hZe = LoadLibraryA("ze_loader.dll");
     if (!hZe) {
-        throw std::runtime_error("Failed to load ze_loader.dll from system");
+        throw std::runtime_error("Failed to load ze_loader.dll from system (Level Zero driver/loader missing)");
     }
     h_module_ = static_cast<void*>(hZe);
+    auto load_sym = [hZe](const char* sym_name) -> void* {
+        return reinterpret_cast<void*>(GetProcAddress(hZe, sym_name));
+    };
+#else
+    // POSIX dynamic loading for Linux Level Zero loader (libze_loader.so.1 / libze_loader.so)
+    void* hZe = dlopen("libze_loader.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!hZe) {
+        hZe = dlopen("libze_loader.so", RTLD_NOW | RTLD_LOCAL);
+    }
+    if (!hZe) {
+        const char* err = dlerror();
+        throw std::runtime_error(std::string("Failed to load libze_loader.so from system: ") + (err ? err : "unknown error"));
+    }
+    h_module_ = hZe;
+    auto load_sym = [hZe](const char* sym_name) -> void* {
+        return dlsym(hZe, sym_name);
+    };
+#endif
 
 #define LOAD_ZE_FN(fn_name, member) \
-    fn_->member = reinterpret_cast<decltype(fn_->member)>(reinterpret_cast<void*>(GetProcAddress(hZe, fn_name)))
+    do { \
+        void* p = load_sym(fn_name); \
+        if (!p) { \
+            throw std::runtime_error(std::string("Failed to resolve Level Zero symbol: ") + (fn_name)); \
+        } \
+        fn_->member = reinterpret_cast<decltype(fn_->member)>(p); \
+    } while (0)
 
     LOAD_ZE_FN("zeCommandListCreate", pfnCommandListCreate);
     LOAD_ZE_FN("zeCommandListClose", pfnCommandListClose);

@@ -70,22 +70,38 @@ public:
             }
         }
 
-        // Fallback to local tokenizer.json / chat_template.jinja if not embedded
+        // Fallback to explicit tokenizer_path / chat_template_path if not embedded
         if (!tokenizer_.is_loaded()) {
-            std::string tok_err;
-            if (tokenizer_.load_from_file(R"(H:\Models\Qwen3.8-27B\tokenizer.json)", &tok_err)) {
-                std::cout << "[xinfer::Engine] Loaded fallback tokenizer from local checkpoint ("
-                          << tokenizer_.vocab_size() << " tokens, "
-                          << tokenizer_.merges_size() << " merges)" << std::endl;
+            if (!config.tokenizer_path.empty()) {
+                std::string tok_err;
+                if (tokenizer_.load_from_file(config.tokenizer_path, &tok_err)) {
+                    std::cout << "[xinfer::Engine] Loaded external tokenizer ("
+                              << tokenizer_.vocab_size() << " tokens, "
+                              << tokenizer_.merges_size() << " merges) from: "
+                              << config.tokenizer_path << std::endl;
+                } else {
+                    if (error_msg) *error_msg = "Failed to load tokenizer from specified path '" + config.tokenizer_path + "': " + tok_err;
+                    return false;
+                }
             } else {
-                if (error_msg) *error_msg = "Failed to load tokenizer from artifact or fallback path: " + tok_err;
+                if (error_msg) {
+                    *error_msg = "No tokenizer embedded in artifact '" + config.artifact_path +
+                                 "' and no external tokenizer path provided. Specify --tokenizer-path <path>.";
+                }
                 return false;
             }
         }
+
         if (!tokenizer_.has_chat_template()) {
-            std::string tmpl_err;
-            if (tokenizer_.load_chat_template_file(R"(H:\Models\Qwen3.8-27B\chat_template.jinja)", &tmpl_err)) {
-                std::cout << "[xinfer::Engine] Loaded fallback chat template from local checkpoint" << std::endl;
+            if (!config.chat_template_path.empty()) {
+                std::string tmpl_err;
+                if (tokenizer_.load_chat_template_file(config.chat_template_path, &tmpl_err)) {
+                    std::cout << "[xinfer::Engine] Loaded external chat template from: "
+                              << config.chat_template_path << std::endl;
+                } else {
+                    std::cerr << "[xinfer::Engine] Warning: Failed to load external chat template '"
+                              << config.chat_template_path << "': " << tmpl_err << std::endl;
+                }
             }
         }
 

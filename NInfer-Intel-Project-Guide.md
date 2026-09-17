@@ -78,12 +78,12 @@ Optional later extensions (only after the core is excellent):
 ### Programming Model
 - **Primary language:** Modern C++20/23
 - **GPU programming:** **SYCL** (with Level Zero backend)
-- **Low-level control:** Intel Level Zero API (closest equivalent to CUDA Driver API)
+- **Low-level control:** Intel Level Zero API (portable driver runtime: dynamically loaded via `dlopen` on Linux and `LoadLibrary` on Windows, using standard `<level_zero/ze_api.h>` headers when present)
 - **Build system:** CMake + Ninja
 - **Compiler:** Intel oneAPI DPC++/C++ Compiler
 
 ### Why SYCL + Level Zero?
-SYCL is pure modern C++ (single-source). When targeting the Level Zero backend on Intel GPUs it is as close to the metal as CUDA is on NVIDIA. You can drop down to raw Level Zero for command lists, fine-grained memory control, and maximum performance.
+SYCL is pure modern C++ (single-source). When targeting the Level Zero backend on Intel GPUs it is as close to the metal as CUDA is on NVIDIA. You can drop down to raw Level Zero for command lists, fine-grained memory control, and maximum performance across both Linux and Windows environments.
 
 ### Key Intel Components
 | Component                      | Role                                      |

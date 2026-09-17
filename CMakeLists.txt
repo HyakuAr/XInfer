@@ -59,6 +59,9 @@ add_library(xinfer_core STATIC
 target_include_directories(xinfer_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+if (UNIX AND NOT APPLE)
+    target_link_libraries(xinfer_core PUBLIC ${CMAKE_DL_LIBS})
+endif()
 target_compile_options(xinfer_core PUBLIC -fsycl)
 target_link_options(xinfer_core PUBLIC -fsycl)
 

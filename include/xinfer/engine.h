@@ -25,6 +25,8 @@ struct GenerationConfig {
 
 struct EngineConfig {
     std::string artifact_path;           // Path to .xinfer file
+    std::string tokenizer_path;          // Optional path to external tokenizer.json if not embedded in artifact
+    std::string chat_template_path;      // Optional path to external chat_template.jinja if not embedded in artifact
     bool        prefer_b60{true};        // Prefer Intel Arc Pro B60 GPU
     size_t      arena_capacity_bytes{256 * 1024 * 1024}; // 256MB scratchpad arena
     size_t      max_seq_len{8192};       // Maximum sequence length supported by KV cache

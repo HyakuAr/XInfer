@@ -28,16 +28,29 @@ struct TokenPred {
 
 int main(int argc, char** argv) {
     std::string artifact_path = "out/qwen3_8_27b.xinfer";
+    std::string tokenizer_path;
     std::string output_npy = "tools/parity/engine_logits.npy";
     std::string output_json = "tools/parity/engine_logits.json";
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--model" && i + 1 < argc) {
+            artifact_path = argv[++i];
+        } else if (arg == "--tokenizer-path" && i + 1 < argc) {
+            tokenizer_path = argv[++i];
+        }
+    }
 
     std::vector<int64_t> prompt_tokens = {760, 12515, 369}; // "The sky is"
 
     std::cout << "========================================================\n"
               << " xinfer: Dump Engine Logits on Intel Arc Pro B60\n"
               << "========================================================\n"
-              << " Artifact:   " << artifact_path << "\n"
-              << " Output NPY: " << output_npy << "\n"
+              << " Artifact:   " << artifact_path << "\n";
+    if (!tokenizer_path.empty()) {
+        std::cout << " Tokenizer:  " << tokenizer_path << "\n";
+    }
+    std::cout << " Output NPY: " << output_npy << "\n"
               << " Output JSON:" << output_json << "\n"
               << " Tokens:     ";
     for (auto t : prompt_tokens) std::cout << t << " ";
@@ -64,8 +77,8 @@ int main(int argc, char** argv) {
             tokenizer.load_from_json_buffer(tok_data.data(), tok_data.size());
         }
     }
-    if (!tokenizer.is_loaded()) {
-        tokenizer.load_from_file(R"(H:\Models\Qwen3.8-27B\tokenizer.json)");
+    if (!tokenizer.is_loaded() && !tokenizer_path.empty()) {
+        tokenizer.load_from_file(tokenizer_path);
     }
 
     std::string err;

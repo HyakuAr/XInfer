@@ -9,13 +9,15 @@
 void print_usage(const char* prog) {
     std::cout << "Usage: " << prog << " [options]\n\n"
               << "Options:\n"
-              << "  --model <path>       Path to .xinfer artifact (default: out/qwen3_8_27b.xinfer)\n"
-              << "  --prompt <str>       Input prompt text (default: 'Tell me a fun fact about space.')\n"
-              << "  --max-tokens <int>   Maximum generated tokens (default: 128)\n"
-              << "  --chunk-size <int>   Chunk size for chunked prefill (default: 512)\n"
-              << "  --max-seq-len <int>  Maximum context length for KV cache (default: 8192)\n"
-              << "  --no-chat-template   Do not apply chat template formatting\n"
-              << "  --help, -h           Show this help message\n"
+              << "  --model <path>              Path to .xinfer artifact (default: out/qwen3_8_27b.xinfer)\n"
+              << "  --tokenizer-path <path>     Path to external tokenizer.json (if not embedded in artifact)\n"
+              << "  --chat-template-path <path> Path to external chat_template.jinja (if not embedded in artifact)\n"
+              << "  --prompt <str>              Input prompt text (default: 'Tell me a fun fact about space.')\n"
+              << "  --max-tokens <int>          Maximum generated tokens (default: 128)\n"
+              << "  --chunk-size <int>          Chunk size for chunked prefill (default: 512)\n"
+              << "  --max-seq-len <int>         Maximum context length for KV cache (default: 8192)\n"
+              << "  --no-chat-template          Do not apply chat template formatting\n"
+              << "  --help, -h                  Show this help message\n"
               << std::endl;
 }
 
@@ -28,6 +30,8 @@ int main(int argc, char** argv) {
     SetConsoleOutputCP(CP_UTF8);
 #endif
     std::string model_path = "out/qwen3_8_27b.xinfer";
+    std::string tokenizer_path;
+    std::string chat_template_path;
     std::string prompt = "Tell me a fun fact about space.";
     int max_new_tokens = 128;
     int chunk_size = 512;
@@ -38,6 +42,10 @@ int main(int argc, char** argv) {
         std::string arg = argv[i];
         if (arg == "--model" && i + 1 < argc) {
             model_path = argv[++i];
+        } else if (arg == "--tokenizer-path" && i + 1 < argc) {
+            tokenizer_path = argv[++i];
+        } else if (arg == "--chat-template-path" && i + 1 < argc) {
+            chat_template_path = argv[++i];
         } else if (arg == "--prompt" && i + 1 < argc) {
             prompt = argv[++i];
         } else if (arg == "--max-tokens" && i + 1 < argc) {
@@ -62,13 +70,18 @@ int main(int argc, char** argv) {
               << " Max Tokens:   " << max_new_tokens << "\n"
               << " Chunk Size:   " << chunk_size << "\n"
               << " Max Seq Len:  " << max_seq_len << "\n"
-              << " ChatTemplate: " << (apply_chat_template ? "enabled" : "disabled") << "\n"
-              << "========================================================\n"
+              << " ChatTemplate: " << (apply_chat_template ? "enabled" : "disabled") << "\n";
+    if (!tokenizer_path.empty()) {
+        std::cout << " Tokenizer:    " << tokenizer_path << "\n";
+    }
+    std::cout << "========================================================\n"
               << std::endl;
 
     xinfer::Engine engine;
     xinfer::EngineConfig config;
     config.artifact_path = model_path;
+    config.tokenizer_path = tokenizer_path;
+    config.chat_template_path = chat_template_path;
     config.prefer_b60 = true;
     config.max_seq_len = static_cast<size_t>(max_seq_len);
     config.prefill_chunk_size = static_cast<size_t>(chunk_size);

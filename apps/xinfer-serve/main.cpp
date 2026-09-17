@@ -25,14 +25,16 @@ void signal_handler(int signal) {
 void print_usage(const char* prog) {
     std::cout << "Usage: " << prog << " [options]\n\n"
               << "Options:\n"
-              << "  --model <path>       Path to .xinfer artifact (default: out/qwen3_8_27b.xinfer)\n"
-              << "  --host <ip>          Host address to bind to (default: 0.0.0.0)\n"
-              << "  --port <port>        HTTP port to listen on (default: 8080)\n"
-              << "  --model-id <name>    Model name in OpenAI responses (default: qwen3.8-27b)\n"
-              << "  --chunk-size <int>   Chunk size for chunked prefill (default: 512)\n"
-              << "  --max-seq-len <int>  Maximum context length for KV cache (default: 8192)\n"
-              << "  --workers <int>      Number of worker threads (1-8, default: 8)\n"
-              << "  --help, -h           Show this help message\n"
+              << "  --model <path>              Path to .xinfer artifact (default: out/qwen3_8_27b.xinfer)\n"
+              << "  --tokenizer-path <path>     Path to external tokenizer.json (if not embedded in artifact)\n"
+              << "  --chat-template-path <path> Path to external chat_template.jinja (if not embedded in artifact)\n"
+              << "  --host <ip>                 Host address to bind to (default: 0.0.0.0)\n"
+              << "  --port <port>               HTTP port to listen on (default: 8080)\n"
+              << "  --model-id <name>           Model name in OpenAI responses (default: qwen3.8-27b)\n"
+              << "  --chunk-size <int>          Chunk size for chunked prefill (default: 512)\n"
+              << "  --max-seq-len <int>         Maximum context length for KV cache (default: 8192)\n"
+              << "  --workers <int>             Number of worker threads (1-8, default: 8)\n"
+              << "  --help, -h                  Show this help message\n"
               << std::endl;
 }
 
@@ -42,6 +44,8 @@ int main(int argc, char** argv) {
 #endif
 
     std::string model_path = "out/qwen3_8_27b.xinfer";
+    std::string tokenizer_path;
+    std::string chat_template_path;
     std::string host = "0.0.0.0";
     int port = 8080;
     std::string model_id = "qwen3.8-27b";
@@ -53,6 +57,10 @@ int main(int argc, char** argv) {
         std::string arg = argv[i];
         if (arg == "--model" && i + 1 < argc) {
             model_path = argv[++i];
+        } else if (arg == "--tokenizer-path" && i + 1 < argc) {
+            tokenizer_path = argv[++i];
+        } else if (arg == "--chat-template-path" && i + 1 < argc) {
+            chat_template_path = argv[++i];
         } else if (arg == "--host" && i + 1 < argc) {
             host = argv[++i];
         } else if (arg == "--port" && i + 1 < argc) {
@@ -78,11 +86,16 @@ int main(int argc, char** argv) {
               << " Model ID:       " << model_id << "\n"
               << " Host:           " << host << "\n"
               << " Port:           " << port << "\n"
-              << " Max Context:    " << max_seq_len << "\n"
-              << "========================================================\n" << std::endl;
+              << " Max Context:    " << max_seq_len << "\n";
+    if (!tokenizer_path.empty()) {
+        std::cout << " Tokenizer:      " << tokenizer_path << "\n";
+    }
+    std::cout << "========================================================\n" << std::endl;
 
     xinfer::EngineConfig eng_cfg;
     eng_cfg.artifact_path = model_path;
+    eng_cfg.tokenizer_path = tokenizer_path;
+    eng_cfg.chat_template_path = chat_template_path;
     eng_cfg.prefer_b60 = true;
     eng_cfg.prefill_chunk_size = chunk_size;
     eng_cfg.max_seq_len = max_seq_len;
