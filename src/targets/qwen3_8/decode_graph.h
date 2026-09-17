@@ -4,6 +4,8 @@
 #include "core/kv_cache.h"
 #include "targets/qwen3_8_27b/weights.h"
 
+#include "targets/qwen3_8/forward.h"
+
 #include <sycl/sycl.hpp>
 #include <sycl/ext/oneapi/experimental/graph.hpp>
 #include <memory>
@@ -45,23 +47,7 @@ private:
     float*   d_logits_{nullptr};
 
     // Fixed activation buffers (FP16 / sycl::half)
-    sycl::half* act_x_{nullptr};
-    sycl::half* act_normed_{nullptr};
-    sycl::half* act_proj_out_{nullptr};
-    sycl::half* act_mlp_gate_{nullptr};
-
-    sycl::half* act_q_gate_{nullptr};
-    sycl::half* act_q_{nullptr};
-    sycl::half* act_k_{nullptr};
-    sycl::half* act_v_{nullptr};
-    sycl::half* act_attn_out_{nullptr};
-
-    sycl::half* act_qkv_raw_{nullptr};
-    sycl::half* act_qkv_conv_{nullptr};
-    sycl::half* act_z_{nullptr};
-    sycl::half* act_b_{nullptr};
-    sycl::half* act_a_{nullptr};
-    sycl::half* act_delta_out_{nullptr};
+    LayerActivationBuffers bufs_;
 
     // Compiled executable graph handle
     std::unique_ptr<sycl::ext::oneapi::experimental::command_graph<

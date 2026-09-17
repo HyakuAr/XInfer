@@ -24,6 +24,52 @@ sycl::event embed_tokens_lookup(sycl::queue& q,
                                  int64_t num_tokens,
                                  int64_t hidden_size);
 
+// Common activation scratchpad buffers for a single forward layer (FP16 / sycl::half)
+struct LayerActivationBuffers {
+    sycl::half* act_x{nullptr};
+    sycl::half* act_normed{nullptr};
+    sycl::half* act_proj_out{nullptr};
+    sycl::half* act_mlp_gate{nullptr};
+
+    // Full Attention buffers
+    sycl::half* act_q_gate{nullptr};
+    sycl::half* act_q{nullptr};
+    sycl::half* act_k{nullptr};
+    sycl::half* act_v{nullptr};
+    sycl::half* act_attn_out{nullptr};
+
+    // Linear Attention buffers
+    sycl::half* act_qkv_raw{nullptr};
+    sycl::half* act_qkv_conv{nullptr};
+    sycl::half* act_z{nullptr};
+    sycl::half* act_b{nullptr};
+    sycl::half* act_a{nullptr};
+    sycl::half* act_delta_out{nullptr};
+};
+
+// Parameterized per-layer forward pass callable from both eager execution and graph capture
+// Computes RMSNorm -> Attention (Full or Linear) -> Residual Add -> RMSNorm -> MLP SwiGLU -> Residual Add.
+// If d_dynamic_pos is non-null, uses dynamic device-pointer overloads for KV cache write & SDPA (required for graph replay).
+void forward_layer(sycl::queue& q,
+                   const qwen3_8_27b::ModelConfig& cfg,
+                   const qwen3_8_27b::LayerWeights& layer,
+                   core::KVCache& kv_cache,
+                   size_t& full_idx,
+                   size_t& linear_idx,
+                   const LayerActivationBuffers& bufs,
+                   int64_t seq_len,
+                   const int64_t* d_positions,
+                   int64_t start_pos,
+                   const int64_t* d_dynamic_pos = nullptr,
+                   bool zero_linear_state = false);
+
+// Final RMSNorm and LM Head projection computing logits from final hidden states
+void forward_lm_head(sycl::queue& q,
+                     const qwen3_8_27b::LoadedModel& model,
+                     sycl::half* act_normed,
+                     const sycl::half* act_x_last,
+                     float* out_logits);
+
 // Forward pass on a chunk of tokens using persistent KV cache and recurrent states
 // If out_last_token_logits is non-null, computes the LM head logits for token at (seq_len - 1)
 void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,

@@ -52,6 +52,183 @@ sycl::event embed_tokens_lookup(sycl::queue& q,
     return embed_tokens_lookup_impl<float>(q, out_act, embed_table_bf16, d_token_ids, num_tokens, hidden_size);
 }
 
+void forward_layer(sycl::queue& q,
+                   const qwen3_8_27b::ModelConfig& cfg,
+                   const qwen3_8_27b::LayerWeights& layer,
+                   core::KVCache& kv_cache,
+                   size_t& full_idx,
+                   size_t& linear_idx,
+                   const LayerActivationBuffers& bufs,
+                   int64_t seq_len,
+                   const int64_t* d_positions,
+                   int64_t start_pos,
+                   const int64_t* d_dynamic_pos,
+                   bool zero_linear_state) {
+    const int64_t hidden_size = cfg.hidden_size;
+    const int64_t intermediate_size = cfg.intermediate_size;
+
+    // Input RMSNorm
+    ops::rmsnorm(q, bufs.act_normed, bufs.act_x, layer.d_input_layernorm, seq_len, hidden_size);
+
+    if (layer.layer_type == "full_attention") {
+        // Full attention:
+        // Fused Q, K, V wide GEMV projection launch
+        ops::FusedProjectionDesc fa_projs[3] = {
+            {bufs.act_q_gate, static_cast<const uint8_t*>(layer.q_proj.d_weights_int4),
+             static_cast<const sycl::half*>(layer.q_proj.d_scales), nullptr, cfg.full_q_gate_dim()},
+            {bufs.act_k, static_cast<const uint8_t*>(layer.k_proj.d_weights_int4),
+             static_cast<const sycl::half*>(layer.k_proj.d_scales), nullptr, cfg.full_k_dim()},
+            {bufs.act_v, static_cast<const uint8_t*>(layer.v_proj.d_weights_int4),
+             static_cast<const sycl::half*>(layer.v_proj.d_scales), nullptr, cfg.full_v_dim()}
+        };
+        ops::linear_int4_fused(q, bufs.act_normed, fa_projs, 3, seq_len, hidden_size);
+
+        int64_t num_q_heads = cfg.num_attention_heads;
+        int64_t head_dim = cfg.head_dim;
+        int64_t q_gate_dim = cfg.full_q_gate_dim();
+
+        sycl::half* q_ptr = bufs.act_q;
+        const sycl::half* q_gate_ptr = bufs.act_q_gate;
+
+        // Q and Gate extraction and output gating:
+        // Citing official transformers/models/qwen3_5/modeling_qwen3_5.py (Qwen3_5Attention.forward, lines 654-688):
+        //   query_states, gate = torch.chunk(
+        //       self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2), 2, dim=-1
+        //   )
+        //   gate = gate.reshape(*input_shape, -1)
+        //   ...
+        //   attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        //   attn_output = attn_output * torch.sigmoid(gate)
+        // For each of the num_q_heads (24), q_proj produces 2 * head_dim = 512 channels.
+        // Chunk 0 (channels 0..255) is Q; Chunk 1 (channels 256..511) is Gate.
+        q.parallel_for(sycl::range<2>(seq_len, num_q_heads), [=](sycl::id<2> idx) {
+            int64_t t = idx[0];
+            int64_t h = idx[1];
+            for (int d = 0; d < head_dim; ++d) {
+                q_ptr[(t * num_q_heads + h) * head_dim + d] = q_gate_ptr[t * q_gate_dim + h * 2 * head_dim + d];
+            }
+        });
+
+        // Head RMSNorm on Q and K (Qwen3_5RMSNorm: 1.0 + weight, only on head_dim)
+        ops::rmsnorm(q, bufs.act_q, bufs.act_q, layer.d_q_norm, seq_len * num_q_heads, head_dim);
+        ops::rmsnorm(q, bufs.act_k, bufs.act_k, layer.d_k_norm, seq_len * cfg.num_key_value_heads, head_dim);
+
+        // RoPE on Q and K
+        ops::rope(q, bufs.act_q, bufs.act_k, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, d_positions, cfg.rope_theta, cfg.rope_dim);
+
+        // Write K and V into KV cache and perform Causal SDPA
+        if (d_dynamic_pos) {
+            ops::attention_write_kv_cache_dynamic(q, kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
+                                                  bufs.act_k, bufs.act_v, d_dynamic_pos, seq_len, cfg.num_key_value_heads, head_dim,
+                                                  static_cast<int64_t>(kv_cache.max_seq_len()));
+
+            ops::sdpa_causal_cached_dynamic(q, bufs.act_attn_out, bufs.act_q,
+                                            kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
+                                            d_dynamic_pos, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, 0.0f,
+                                            static_cast<int64_t>(kv_cache.max_seq_len()));
+        } else {
+            ops::attention_write_kv_cache(q, kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
+                                          bufs.act_k, bufs.act_v, start_pos, seq_len, cfg.num_key_value_heads, head_dim,
+                                          static_cast<int64_t>(kv_cache.max_seq_len()));
+
+            ops::sdpa_causal_cached(q, bufs.act_attn_out, bufs.act_q,
+                                    kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
+                                    start_pos, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, 0.0f,
+                                    static_cast<int64_t>(kv_cache.max_seq_len()));
+        }
+
+        // Output gating: attn_out *= sigmoid(gate) matching torch.sigmoid(gate)
+        sycl::half* attn_out_ptr = bufs.act_attn_out;
+        q.parallel_for(sycl::range<2>(seq_len, num_q_heads), [=](sycl::id<2> idx) {
+            int64_t t = idx[0];
+            int64_t h = idx[1];
+            for (int d = 0; d < head_dim; ++d) {
+                float gate_val = static_cast<float>(q_gate_ptr[t * q_gate_dim + h * 2 * head_dim + head_dim + d]);
+                float sig = 1.0f / (1.0f + sycl::exp(-gate_val));
+                float cur_val = static_cast<float>(attn_out_ptr[(t * num_q_heads + h) * head_dim + d]);
+                attn_out_ptr[(t * num_q_heads + h) * head_dim + d] = static_cast<sycl::half>(cur_val * sig);
+            }
+        });
+
+        // Out projection
+        ops::linear_int4(q, bufs.act_proj_out, bufs.act_attn_out,
+                         static_cast<const uint8_t*>(layer.o_proj.d_weights_int4),
+                         static_cast<const sycl::half*>(layer.o_proj.d_scales),
+                         nullptr, seq_len, hidden_size, cfg.full_out_dim());
+        full_idx++;
+    } else {
+        // Linear attention:
+        // Fused in_proj_qkv + in_proj_z + in_proj_b + in_proj_a wide GEMV launch
+        ops::FusedProjectionDesc la_projs[4] = {
+            {bufs.act_qkv_raw, static_cast<const uint8_t*>(layer.in_proj_qkv.d_weights_int4),
+             static_cast<const sycl::half*>(layer.in_proj_qkv.d_scales), nullptr, cfg.linear_conv_channels},
+            {bufs.act_z, static_cast<const uint8_t*>(layer.in_proj_z.d_weights_int4),
+             static_cast<const sycl::half*>(layer.in_proj_z.d_scales), nullptr, cfg.linear_z_dim},
+            {bufs.act_b, static_cast<const uint8_t*>(layer.in_proj_b.d_weights_int4),
+             static_cast<const sycl::half*>(layer.in_proj_b.d_scales), nullptr, cfg.linear_b_dim},
+            {bufs.act_a, static_cast<const uint8_t*>(layer.in_proj_a.d_weights_int4),
+             static_cast<const sycl::half*>(layer.in_proj_a.d_scales), nullptr, cfg.linear_a_dim}
+        };
+        ops::linear_int4_fused(q, bufs.act_normed, la_projs, 4, seq_len, hidden_size);
+
+        // Stateful Causal Conv1d + SiLU
+        causal_conv1d_silu(q, bufs.act_qkv_conv, bufs.act_qkv_raw, layer.d_conv1d_weight, seq_len,
+                           kv_cache.conv_state(linear_idx));
+
+        // Stateful Recurrent Gated Delta Net + RMSNormGated
+        recurrent_gated_delta_net(q, bufs.act_delta_out, bufs.act_qkv_conv, bufs.act_z, bufs.act_b, bufs.act_a,
+                                   layer.d_A_log, layer.d_dt_bias, layer.d_norm_weight,
+                                   kv_cache.linear_state(linear_idx), seq_len, zero_linear_state);
+
+        // Out projection
+        ops::linear_int4(q, bufs.act_proj_out, bufs.act_delta_out,
+                         static_cast<const uint8_t*>(layer.out_proj.d_weights_int4),
+                         static_cast<const sycl::half*>(layer.out_proj.d_scales),
+                         nullptr, seq_len, hidden_size, cfg.linear_z_dim);
+        linear_idx++;
+    }
+
+    // Residual connection: act_x += act_proj_out
+    ops::add_inplace(q, bufs.act_x, bufs.act_proj_out, seq_len * hidden_size);
+
+    // MLP
+    ops::rmsnorm(q, bufs.act_normed, bufs.act_x, layer.d_post_attention_layernorm, seq_len, hidden_size);
+
+    // Fused MLP Gate + Up + SwiGLU: SiLU(gate) * up computed directly in sub-group registers
+    ops::mlp_gate_up_swiglu_int4(q, bufs.act_mlp_gate, bufs.act_normed,
+                                 static_cast<const uint8_t*>(layer.gate_proj.d_weights_int4),
+                                 static_cast<const sycl::half*>(layer.gate_proj.d_scales),
+                                 static_cast<const uint8_t*>(layer.up_proj.d_weights_int4),
+                                 static_cast<const sycl::half*>(layer.up_proj.d_scales),
+                                 seq_len, intermediate_size, hidden_size);
+
+    // Down projection
+    ops::linear_int4(q, bufs.act_proj_out, bufs.act_mlp_gate,
+                     static_cast<const uint8_t*>(layer.down_proj.d_weights_int4),
+                     static_cast<const sycl::half*>(layer.down_proj.d_scales),
+                     nullptr, seq_len, hidden_size, intermediate_size);
+
+    // Residual connection: act_x += act_proj_out
+    ops::add_inplace(q, bufs.act_x, bufs.act_proj_out, seq_len * hidden_size);
+}
+
+void forward_lm_head(sycl::queue& q,
+                     const qwen3_8_27b::LoadedModel& model,
+                     sycl::half* act_normed,
+                     const sycl::half* act_x_last,
+                     float* out_logits) {
+    const auto& cfg = model.config();
+    const int64_t hidden_size = cfg.hidden_size;
+
+    ops::rmsnorm(q, act_normed, act_x_last, model.d_final_norm(), 1, hidden_size);
+
+    const auto& lm_head = model.lm_head();
+    ops::linear_int4(q, out_logits, act_normed,
+                     static_cast<const uint8_t*>(lm_head.d_weights_int4),
+                     static_cast<const sycl::half*>(lm_head.d_scales),
+                     nullptr, 1, cfg.vocab_size, hidden_size);
+}
+
 void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
                    core::DeviceArena& arena,
                    const qwen3_8_27b::LoadedModel& model,
@@ -87,180 +264,41 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
     const int64_t hidden_size = cfg.hidden_size;
     const int64_t intermediate_size = cfg.intermediate_size;
 
-    sycl::half* act_x = static_cast<sycl::half*>(arena.allocate(seq_len * hidden_size * sizeof(sycl::half)));
-    sycl::half* act_normed = static_cast<sycl::half*>(arena.allocate(seq_len * hidden_size * sizeof(sycl::half)));
-    sycl::half* act_proj_out = static_cast<sycl::half*>(arena.allocate(seq_len * hidden_size * sizeof(sycl::half)));
+    LayerActivationBuffers bufs;
+    bufs.act_x = static_cast<sycl::half*>(arena.allocate(seq_len * hidden_size * sizeof(sycl::half)));
+    bufs.act_normed = static_cast<sycl::half*>(arena.allocate(seq_len * hidden_size * sizeof(sycl::half)));
+    bufs.act_proj_out = static_cast<sycl::half*>(arena.allocate(seq_len * hidden_size * sizeof(sycl::half)));
+    bufs.act_mlp_gate = static_cast<sycl::half*>(arena.allocate(seq_len * intermediate_size * sizeof(sycl::half)));
 
-    // MLP buffers (act_mlp_gate holds both gate/up fused SwiGLU activation directly)
-    sycl::half* act_mlp_gate = static_cast<sycl::half*>(arena.allocate(seq_len * intermediate_size * sizeof(sycl::half)));
+    bufs.act_q_gate   = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_q_gate_dim() * sizeof(sycl::half)));
+    bufs.act_q        = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_q_dim() * sizeof(sycl::half)));
+    bufs.act_k        = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_k_dim() * sizeof(sycl::half)));
+    bufs.act_v        = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_v_dim() * sizeof(sycl::half)));
+    bufs.act_attn_out = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_out_dim() * sizeof(sycl::half)));
 
-    // Full Attention buffers
-    sycl::half* act_q_gate   = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_q_gate_dim() * sizeof(sycl::half)));
-    sycl::half* act_q        = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_q_dim() * sizeof(sycl::half)));
-    sycl::half* act_k        = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_k_dim() * sizeof(sycl::half)));
-    sycl::half* act_v        = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_v_dim() * sizeof(sycl::half)));
-    sycl::half* act_attn_out = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_out_dim() * sizeof(sycl::half)));
-
-    // Linear Attention buffers
-    sycl::half* act_qkv_raw   = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_conv_channels * sizeof(sycl::half)));
-    sycl::half* act_qkv_conv  = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_conv_channels * sizeof(sycl::half)));
-    sycl::half* act_z         = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_z_dim * sizeof(sycl::half)));
-    sycl::half* act_b         = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_b_dim * sizeof(sycl::half)));
-    sycl::half* act_a         = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_a_dim * sizeof(sycl::half)));
-    sycl::half* act_delta_out = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_z_dim * sizeof(sycl::half)));
+    bufs.act_qkv_raw   = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_conv_channels * sizeof(sycl::half)));
+    bufs.act_qkv_conv  = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_conv_channels * sizeof(sycl::half)));
+    bufs.act_z         = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_z_dim * sizeof(sycl::half)));
+    bufs.act_b         = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_b_dim * sizeof(sycl::half)));
+    bufs.act_a         = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_a_dim * sizeof(sycl::half)));
+    bufs.act_delta_out = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_z_dim * sizeof(sycl::half)));
 
     // 1. Initial embedding lookup
-    embed_tokens_lookup(q, act_x, model.d_embed_tokens(), d_token_ids, seq_len, hidden_size);
+    embed_tokens_lookup(q, bufs.act_x, model.d_embed_tokens(), d_token_ids, seq_len, hidden_size);
 
-    // 2. Loop over layers
+    // 2. Loop over layers using shared parameterized forward_layer
     const auto& layers = model.layers();
     size_t full_idx = 0;
     size_t linear_idx = 0;
 
     for (size_t l = 0; l < layers.size(); ++l) {
-        const auto& layer = layers[l];
-
-        // Input RMSNorm
-        ops::rmsnorm(q, act_normed, act_x, layer.d_input_layernorm, seq_len, hidden_size);
-
-        if (layer.layer_type == "full_attention") {
-            // Full attention:
-            // Fused Q, K, V wide GEMV projection launch
-            ops::FusedProjectionDesc fa_projs[3] = {
-                {act_q_gate, static_cast<const uint8_t*>(layer.q_proj.d_weights_int4),
-                 static_cast<const sycl::half*>(layer.q_proj.d_scales), nullptr, cfg.full_q_gate_dim()},
-                {act_k, static_cast<const uint8_t*>(layer.k_proj.d_weights_int4),
-                 static_cast<const sycl::half*>(layer.k_proj.d_scales), nullptr, cfg.full_k_dim()},
-                {act_v, static_cast<const uint8_t*>(layer.v_proj.d_weights_int4),
-                 static_cast<const sycl::half*>(layer.v_proj.d_scales), nullptr, cfg.full_v_dim()}
-            };
-            ops::linear_int4_fused(q, act_normed, fa_projs, 3, seq_len, hidden_size);
-
-            int64_t num_q_heads = cfg.num_attention_heads;
-            int64_t head_dim = cfg.head_dim;
-            int64_t q_gate_dim = cfg.full_q_gate_dim();
-
-            // Q and Gate extraction and output gating:
-            // Citing official transformers/models/qwen3_5/modeling_qwen3_5.py (Qwen3_5Attention.forward, lines 654-688):
-            //   query_states, gate = torch.chunk(
-            //       self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2), 2, dim=-1
-            //   )
-            //   gate = gate.reshape(*input_shape, -1)
-            //   ...
-            //   attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-            //   attn_output = attn_output * torch.sigmoid(gate)
-            // For each of the num_q_heads (24), q_proj produces 2 * head_dim = 512 channels.
-            // Chunk 0 (channels 0..255) is Q; Chunk 1 (channels 256..511) is Gate.
-            q.parallel_for(sycl::range<2>(seq_len, num_q_heads), [=](sycl::id<2> idx) {
-                int64_t t = idx[0];
-                int64_t h = idx[1];
-                for (int d = 0; d < head_dim; ++d) {
-                    act_q[(t * num_q_heads + h) * head_dim + d] = act_q_gate[t * q_gate_dim + h * 2 * head_dim + d];
-                }
-            });
-
-            // Head RMSNorm on Q and K (Qwen3_5RMSNorm: 1.0 + weight, only on head_dim)
-            ops::rmsnorm(q, act_q, act_q, layer.d_q_norm, seq_len * num_q_heads, head_dim);
-            ops::rmsnorm(q, act_k, act_k, layer.d_k_norm, seq_len * cfg.num_key_value_heads, head_dim);
-
-            // RoPE on Q and K
-            ops::rope(q, act_q, act_k, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, d_positions, cfg.rope_theta, cfg.rope_dim);
-
-            // Write K and V into KV cache
-            ops::attention_write_kv_cache(q, kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
-                                          act_k, act_v, start_pos, seq_len, cfg.num_key_value_heads, head_dim,
-                                          static_cast<int64_t>(kv_cache.max_seq_len()));
-
-            // Causal Scaled Dot-Product Attention reading from KV Cache
-            ops::sdpa_causal_cached(q, act_attn_out, act_q,
-                                    kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
-                                    start_pos, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, 0.0f,
-                                    static_cast<int64_t>(kv_cache.max_seq_len()));
-
-            // Output gating: attn_out *= sigmoid(gate) matching torch.sigmoid(gate)
-            q.parallel_for(sycl::range<2>(seq_len, num_q_heads), [=](sycl::id<2> idx) {
-                int64_t t = idx[0];
-                int64_t h = idx[1];
-                for (int d = 0; d < head_dim; ++d) {
-                    float gate_val = static_cast<float>(act_q_gate[t * q_gate_dim + h * 2 * head_dim + head_dim + d]);
-                    float sig = 1.0f / (1.0f + sycl::exp(-gate_val));
-                    float cur_val = static_cast<float>(act_attn_out[(t * num_q_heads + h) * head_dim + d]);
-                    act_attn_out[(t * num_q_heads + h) * head_dim + d] = static_cast<sycl::half>(cur_val * sig);
-                }
-            });
-
-            // Out projection
-            ops::linear_int4(q, act_proj_out, act_attn_out,
-                             static_cast<const uint8_t*>(layer.o_proj.d_weights_int4),
-                             static_cast<const sycl::half*>(layer.o_proj.d_scales),
-                             nullptr, seq_len, hidden_size, cfg.full_out_dim());
-            full_idx++;
-        } else {
-            // Linear attention:
-            // Fused in_proj_qkv + in_proj_z + in_proj_b + in_proj_a wide GEMV launch
-            ops::FusedProjectionDesc la_projs[4] = {
-                {act_qkv_raw, static_cast<const uint8_t*>(layer.in_proj_qkv.d_weights_int4),
-                 static_cast<const sycl::half*>(layer.in_proj_qkv.d_scales), nullptr, cfg.linear_conv_channels},
-                {act_z, static_cast<const uint8_t*>(layer.in_proj_z.d_weights_int4),
-                 static_cast<const sycl::half*>(layer.in_proj_z.d_scales), nullptr, cfg.linear_z_dim},
-                {act_b, static_cast<const uint8_t*>(layer.in_proj_b.d_weights_int4),
-                 static_cast<const sycl::half*>(layer.in_proj_b.d_scales), nullptr, cfg.linear_b_dim},
-                {act_a, static_cast<const uint8_t*>(layer.in_proj_a.d_weights_int4),
-                 static_cast<const sycl::half*>(layer.in_proj_a.d_scales), nullptr, cfg.linear_a_dim}
-            };
-            ops::linear_int4_fused(q, act_normed, la_projs, 4, seq_len, hidden_size);
-
-            // Stateful Causal Conv1d + SiLU
-            causal_conv1d_silu(q, act_qkv_conv, act_qkv_raw, layer.d_conv1d_weight, seq_len,
-                               kv_cache.conv_state(linear_idx));
-
-            // Stateful Recurrent Gated Delta Rule + RMSNormGated
-            recurrent_gated_delta_net(q, act_delta_out, act_qkv_conv, act_z, act_b, act_a,
-                                       layer.d_A_log, layer.d_dt_bias, layer.d_norm_weight,
-                                       kv_cache.linear_state(linear_idx), seq_len, zero_linear_state);
-
-            // Out projection
-            ops::linear_int4(q, act_proj_out, act_delta_out,
-                             static_cast<const uint8_t*>(layer.out_proj.d_weights_int4),
-                             static_cast<const sycl::half*>(layer.out_proj.d_scales),
-                             nullptr, seq_len, hidden_size, cfg.linear_z_dim);
-            linear_idx++;
-        }
-
-        // Residual connection: act_x += act_proj_out
-        ops::add_inplace(q, act_x, act_proj_out, seq_len * hidden_size);
-
-        // MLP
-        ops::rmsnorm(q, act_normed, act_x, layer.d_post_attention_layernorm, seq_len, hidden_size);
-
-        // Fused MLP Gate + Up + SwiGLU: SiLU(gate) * up computed directly in sub-group registers
-        ops::mlp_gate_up_swiglu_int4(q, act_mlp_gate, act_normed,
-                                     static_cast<const uint8_t*>(layer.gate_proj.d_weights_int4),
-                                     static_cast<const sycl::half*>(layer.gate_proj.d_scales),
-                                     static_cast<const uint8_t*>(layer.up_proj.d_weights_int4),
-                                     static_cast<const sycl::half*>(layer.up_proj.d_scales),
-                                     seq_len, intermediate_size, hidden_size);
-
-        // Down projection
-        ops::linear_int4(q, act_proj_out, act_mlp_gate,
-                         static_cast<const uint8_t*>(layer.down_proj.d_weights_int4),
-                         static_cast<const sycl::half*>(layer.down_proj.d_scales),
-                         nullptr, seq_len, hidden_size, intermediate_size);
-
-        // Residual connection: act_x += act_proj_out
-        ops::add_inplace(q, act_x, act_proj_out, seq_len * hidden_size);
+        forward_layer(q, cfg, layers[l], kv_cache, full_idx, linear_idx, bufs,
+                      seq_len, d_positions, start_pos, nullptr, zero_linear_state);
     }
 
     // 3. Optional LM Head projection for the last token in chunk
     if (out_last_token_logits) {
-        sycl::half* last_x = act_x + (seq_len - 1) * hidden_size;
-        ops::rmsnorm(q, act_normed, last_x, model.d_final_norm(), 1, hidden_size);
-
-        const auto& lm_head = model.lm_head();
-        ops::linear_int4(q, out_last_token_logits, act_normed,
-                         static_cast<const uint8_t*>(lm_head.d_weights_int4),
-                         static_cast<const sycl::half*>(lm_head.d_scales),
-                         nullptr, 1, cfg.vocab_size, hidden_size);
+        forward_lm_head(q, model, bufs.act_normed, bufs.act_x + (seq_len - 1) * hidden_size, out_last_token_logits);
     }
 }
 
