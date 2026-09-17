@@ -175,6 +175,22 @@ target_link_options(test_decode_graph PRIVATE -fsycl)
 
 add_test(NAME DecodeGraphTest COMMAND test_decode_graph)
 
+add_executable(test_tokenizer_bpe
+    tests/test_tokenizer_bpe.cpp
+)
+target_include_directories(test_tokenizer_bpe PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(test_tokenizer_bpe PRIVATE
+    xinfer_targets
+    xinfer_runtime
+)
+target_compile_options(test_tokenizer_bpe PRIVATE -fsycl)
+target_link_options(test_tokenizer_bpe PRIVATE -fsycl)
+
+add_test(NAME TokenizerBPETest COMMAND test_tokenizer_bpe)
+
 # Milestone 9: OpenAI-Compatible HTTP Serving
 add_library(xinfer_serve STATIC
     src/serve/protocol.cpp

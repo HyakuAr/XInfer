@@ -45,21 +45,38 @@ public:
         if (reader.has_section("tokenizer.data")) {
             std::vector<uint8_t> tok_data;
             if (reader.read_section("tokenizer.data", tok_data, error_msg)) {
-                tokenizer_.load_from_json_buffer(tok_data.data(), tok_data.size());
-                std::cout << "[xinfer::Engine] Loaded tokenizer from artifact ("
-                          << tokenizer_.vocab_size() << " tokens)" << std::endl;
+                std::string tok_err;
+                if (tokenizer_.load_from_json_buffer(tok_data.data(), tok_data.size(), &tok_err)) {
+                    std::cout << "[xinfer::Engine] Loaded tokenizer from artifact ("
+                              << tokenizer_.vocab_size() << " tokens, "
+                              << tokenizer_.merges_size() << " merges)" << std::endl;
+                } else {
+                    std::cerr << "[xinfer::Engine] Failed to parse embedded tokenizer: " << tok_err << std::endl;
+                }
             }
         }
 
         // Fallback to local tokenizer.json if not embedded
         if (!tokenizer_.is_loaded()) {
-            if (tokenizer_.load_from_file(R"(H:\Models\Qwen3.8-27B\tokenizer.json)")) {
+            std::string tok_err;
+            if (tokenizer_.load_from_file(R"(H:\Models\Qwen3.8-27B\tokenizer.json)", &tok_err)) {
                 std::cout << "[xinfer::Engine] Loaded fallback tokenizer from local checkpoint ("
-                          << tokenizer_.vocab_size() << " tokens)" << std::endl;
+                          << tokenizer_.vocab_size() << " tokens, "
+                          << tokenizer_.merges_size() << " merges)" << std::endl;
             } else {
-                if (error_msg) *error_msg = "Failed to load tokenizer from artifact or fallback path";
+                if (error_msg) *error_msg = "Failed to load tokenizer from artifact or fallback path: " + tok_err;
                 return false;
             }
+        }
+
+        // Fail loudly if required special tokens are missing from loaded tokenizer
+        if (tokenizer_.eos_token_id() < 0) {
+            if (error_msg) *error_msg = "Loaded tokenizer missing valid EOS token ID (<|endoftext|>)";
+            return false;
+        }
+        if (tokenizer_.im_end_token_id() < 0) {
+            if (error_msg) *error_msg = "Loaded tokenizer missing valid IM_END token ID (<|im_end|>)";
+            return false;
         }
 
         // 4. Materialize model weights into GPU USM memory
@@ -206,8 +223,18 @@ public:
             auto t_first = std::chrono::high_resolution_clock::now();
             result.time_to_first_token_sec = std::chrono::duration<double>(t_first - t0).count();
 
+            // Resolve stop tokens dynamically from loaded tokenizer/config unless explicitly overridden (>= 0)
+            int64_t eos_tok = (gen_config.eos_token_id >= 0) ? gen_config.eos_token_id : tokenizer_.eos_token_id();
+            int64_t im_end_tok = (gen_config.im_end_token_id >= 0) ? gen_config.im_end_token_id : tokenizer_.im_end_token_id();
+            if (eos_tok < 0) {
+                result.success = false;
+                result.error_code = "missing_eos_token";
+                result.error_msg = "No valid EOS token ID configured or found in loaded tokenizer";
+                return result;
+            }
+
             // Check for stop tokens on first token
-            if (current_tok == gen_config.eos_token_id || current_tok == gen_config.im_end_token_id) {
+            if (current_tok == eos_tok || (im_end_tok >= 0 && current_tok == im_end_tok)) {
                 result.generated_tokens = 0;
                 result.finish_reason = "stop";
                 result.total_time_sec = result.time_to_first_token_sec;
@@ -258,7 +285,7 @@ public:
                     }
                 }
 
-                if (next_tok == gen_config.eos_token_id || next_tok == gen_config.im_end_token_id) {
+                if (next_tok == eos_tok || (im_end_tok >= 0 && next_tok == im_end_tok)) {
                     result.finish_reason = "stop";
                     break;
                 }
@@ -319,6 +346,14 @@ public:
         }
     }
 
+    int64_t eos_token_id() const noexcept {
+        return tokenizer_.eos_token_id();
+    }
+
+    int64_t im_end_token_id() const noexcept {
+        return tokenizer_.im_end_token_id();
+    }
+
     void reset() {
         if (kv_cache_) {
             kv_cache_->clear();
@@ -355,6 +390,14 @@ bool Engine::is_loaded() const noexcept {
 
 size_t Engine::max_seq_len() const noexcept {
     return impl_->max_seq_len();
+}
+
+int64_t Engine::eos_token_id() const noexcept {
+    return impl_->eos_token_id();
+}
+
+int64_t Engine::im_end_token_id() const noexcept {
+    return impl_->im_end_token_id();
 }
 
 size_t Engine::count_tokens(const std::string& text, bool apply_chat_template) const {

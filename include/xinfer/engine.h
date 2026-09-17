@@ -11,8 +11,8 @@ namespace xinfer {
 struct GenerationConfig {
     int     max_new_tokens{256};
     float   temperature{0.0f};           // 0.0 = greedy argmax sampling
-    int64_t eos_token_id{248044};        // <|endoftext|>
-    int64_t im_end_token_id{248046};     // <|im_end|>
+    int64_t eos_token_id{-1};            // Sentinel: default (-1) resolves dynamically to loaded model/tokenizer EOS (<|endoftext|>)
+    int64_t im_end_token_id{-1};         // Sentinel: default (-1) resolves dynamically to loaded model/tokenizer IM_END (<|im_end|>)
     bool    apply_chat_template{true};
 };
 
@@ -61,6 +61,10 @@ public:
 
     // Query maximum sequence length supported by the model/KV cache
     size_t max_seq_len() const noexcept;
+
+    // Query special token IDs resolved dynamically from loaded model/tokenizer (source of truth)
+    int64_t eos_token_id() const noexcept;
+    int64_t im_end_token_id() const noexcept;
 
     // Tokenize text and return token count without generating
     size_t count_tokens(const std::string& text, bool apply_chat_template = true) const;
