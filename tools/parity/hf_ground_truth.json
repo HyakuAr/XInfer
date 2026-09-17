@@ -1,0 +1,265 @@
+{
+  "model_name": "Qwen/Qwen3.8-27B",
+  "checkpoint_dir": "H:\\Models\\Qwen3.8-27B",
+  "precision": "bfloat16 (unquantized)",
+  "prompt": "The sky is",
+  "prompt_tokens": [
+    760,
+    12515,
+    369
+  ],
+  "prompt_token_strings": [
+    "The",
+    " sky",
+    " is"
+  ],
+  "forward_time_sec": 348.64,
+  "positions": [
+    {
+      "position": 0,
+      "input_token_id": 760,
+      "input_token_str": "The",
+      "top_predictions": [
+        {
+          "rank": 1,
+          "token_id": 2614,
+          "token_str": " following",
+          "logit": 8.9375,
+          "probability": 0.028802
+        },
+        {
+          "rank": 2,
+          "token_id": 20438,
+          "token_str": " passage",
+          "logit": 8.625,
+          "probability": 0.021072
+        },
+        {
+          "rank": 3,
+          "token_id": 220,
+          "token_str": " ",
+          "logit": 8.625,
+          "probability": 0.021072
+        },
+        {
+          "rank": 4,
+          "token_id": 3049,
+          "token_str": " author",
+          "logit": 8.0625,
+          "probability": 0.012006
+        },
+        {
+          "rank": 5,
+          "token_id": 3788,
+          "token_str": " study",
+          "logit": 7.9375,
+          "probability": 0.010596
+        },
+        {
+          "rank": 6,
+          "token_id": 2972,
+          "token_str": " **",
+          "logit": 7.875,
+          "probability": 0.009954
+        },
+        {
+          "rank": 7,
+          "token_id": 1414,
+          "token_str": " text",
+          "logit": 7.75,
+          "probability": 0.008784
+        },
+        {
+          "rank": 8,
+          "token_id": 4496,
+          "token_str": " term",
+          "logit": 7.6562,
+          "probability": 0.007998
+        },
+        {
+          "rank": 9,
+          "token_id": 1118,
+          "token_str": " first",
+          "logit": 7.5938,
+          "probability": 0.007513
+        },
+        {
+          "rank": 10,
+          "token_id": 328,
+          "token_str": " \"",
+          "logit": 7.375,
+          "probability": 0.006037
+        }
+      ],
+      "top1_token_id": 2614,
+      "top1_token_str": " following",
+      "top1_logit": 8.9375,
+      "top1_prob": 0.028802
+    },
+    {
+      "position": 1,
+      "input_token_id": 12515,
+      "input_token_str": " sky",
+      "top_predictions": [
+        {
+          "rank": 1,
+          "token_id": 369,
+          "token_str": " is",
+          "logit": 14.75,
+          "probability": 0.236563
+        },
+        {
+          "rank": 2,
+          "token_id": 557,
+          "token_str": " was",
+          "logit": 14.3125,
+          "probability": 0.152737
+        },
+        {
+          "rank": 3,
+          "token_id": 3294,
+          "token_str": " above",
+          "logit": 13.75,
+          "probability": 0.087027
+        },
+        {
+          "rank": 4,
+          "token_id": 888,
+          "token_str": " over",
+          "logit": 13.1875,
+          "probability": 0.049586
+        },
+        {
+          "rank": 5,
+          "token_id": 303,
+          "token_str": " in",
+          "logit": 12.8125,
+          "probability": 0.03408
+        },
+        {
+          "rank": 6,
+          "token_id": 11,
+          "token_str": ",",
+          "logit": 12.75,
+          "probability": 0.032015
+        },
+        {
+          "rank": 7,
+          "token_id": 579,
+          "token_str": "'s",
+          "logit": 12.0,
+          "probability": 0.015123
+        },
+        {
+          "rank": 8,
+          "token_id": 6316,
+          "token_str": " turned",
+          "logit": 11.875,
+          "probability": 0.013346
+        },
+        {
+          "rank": 9,
+          "token_id": 6121,
+          "token_str": " dark",
+          "logit": 11.875,
+          "probability": 0.013346
+        },
+        {
+          "rank": 10,
+          "token_id": 682,
+          "token_str": " has",
+          "logit": 11.6875,
+          "probability": 0.011064
+        }
+      ],
+      "top1_token_id": 369,
+      "top1_token_str": " is",
+      "top1_logit": 14.75,
+      "top1_prob": 0.236563
+    },
+    {
+      "position": 2,
+      "input_token_id": 369,
+      "input_token_str": " is",
+      "top_predictions": [
+        {
+          "rank": 1,
+          "token_id": 264,
+          "token_str": " a",
+          "logit": 14.8125,
+          "probability": 0.135645
+        },
+        {
+          "rank": 2,
+          "token_id": 6105,
+          "token_str": " blue",
+          "logit": 14.5,
+          "probability": 0.09924
+        },
+        {
+          "rank": 3,
+          "token_id": 279,
+          "token_str": " the",
+          "logit": 14.4375,
+          "probability": 0.093228
+        },
+        {
+          "rank": 4,
+          "token_id": 524,
+          "token_str": " not",
+          "logit": 13.75,
+          "probability": 0.046878
+        },
+        {
+          "rank": 5,
+          "token_id": 6121,
+          "token_str": " dark",
+          "logit": 13.6875,
+          "probability": 0.044038
+        },
+        {
+          "rank": 6,
+          "token_id": 2708,
+          "token_str": " clear",
+          "logit": 13.5,
+          "probability": 0.036508
+        },
+        {
+          "rank": 7,
+          "token_id": 2400,
+          "token_str": " full",
+          "logit": 13.3125,
+          "probability": 0.030267
+        },
+        {
+          "rank": 8,
+          "token_id": 9896,
+          "token_str": " filled",
+          "logit": 12.625,
+          "probability": 0.015219
+        },
+        {
+          "rank": 9,
+          "token_id": 3428,
+          "token_str": " often",
+          "logit": 12.5625,
+          "probability": 0.014297
+        },
+        {
+          "rank": 10,
+          "token_id": 19177,
+          "token_str": " grey",
+          "logit": 12.5625,
+          "probability": 0.014297
+        }
+      ],
+      "top1_token_id": 264,
+      "top1_token_str": " a",
+      "top1_logit": 14.8125,
+      "top1_prob": 0.135645
+    }
+  ],
+  "next_predicted_token_id": 264,
+  "next_predicted_token_str": " a",
+  "next_predicted_prob": 0.135645
+}

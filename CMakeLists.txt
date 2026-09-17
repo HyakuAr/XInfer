@@ -246,5 +246,16 @@ target_link_libraries(verify_pcie_and_memory PRIVATE
 target_compile_options(verify_pcie_and_memory PRIVATE -fsycl)
 target_link_options(verify_pcie_and_memory PRIVATE -fsycl)
 
-
-
+add_executable(dump_engine_logits
+    tools/parity/dump_engine_logits.cpp
+)
+target_include_directories(dump_engine_logits PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(dump_engine_logits PRIVATE
+    xinfer_targets
+    xinfer_runtime
+)
+target_compile_options(dump_engine_logits PRIVATE -fsycl)
+target_link_options(dump_engine_logits PRIVATE -fsycl)

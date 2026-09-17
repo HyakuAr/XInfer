@@ -1,0 +1,213 @@
+{
+  "verified_at": "2026-09-17",
+  "prompt": "The sky is",
+  "prompt_tokens": [
+    760,
+    12515,
+    369
+  ],
+  "model_reference": {
+    "name": "Qwen/Qwen3.8-27B",
+    "checkpoint": "H:\\Models\\Qwen3.8-27B",
+    "precision": "bfloat16 (unquantized)"
+  },
+  "engine_under_test": {
+    "name": "xinfer (Intel Arc Pro B60)",
+    "quantization": "INT4-G128-SYM"
+  },
+  "metrics": {
+    "top1_match": true,
+    "top1_token_id": 264,
+    "top1_token_str": " a",
+    "top5_overlap": 0.8,
+    "top10_overlap": 0.8,
+    "cosine_similarity": 0.994718,
+    "mean_absolute_error": 0.2851,
+    "rmse": 0.3593,
+    "max_absolute_error": 1.748,
+    "jensen_shannon_divergence": 0.011228
+  },
+  "parity_passed": true,
+  "top10_comparison": [
+    {
+      "rank": 1,
+      "hf_ref": {
+        "rank": 1,
+        "token_id": 264,
+        "token_str": " a",
+        "logit": 14.8125,
+        "probability": 0.135645
+      },
+      "engine": {
+        "rank": 1,
+        "token_id": 264,
+        "token_str": " a",
+        "logit": 15.1551,
+        "probability": 0.14065
+      },
+      "rank_match": true
+    },
+    {
+      "rank": 2,
+      "hf_ref": {
+        "rank": 2,
+        "token_id": 6105,
+        "token_str": " blue",
+        "logit": 14.5,
+        "probability": 0.09924
+      },
+      "engine": {
+        "rank": 2,
+        "token_id": 6105,
+        "token_str": " blue",
+        "logit": 15.091,
+        "probability": 0.131924
+      },
+      "rank_match": true
+    },
+    {
+      "rank": 3,
+      "hf_ref": {
+        "rank": 3,
+        "token_id": 279,
+        "token_str": " the",
+        "logit": 14.4375,
+        "probability": 0.093228
+      },
+      "engine": {
+        "rank": 3,
+        "token_id": 279,
+        "token_str": " the",
+        "logit": 14.7089,
+        "probability": 0.0900206
+      },
+      "rank_match": true
+    },
+    {
+      "rank": 4,
+      "hf_ref": {
+        "rank": 4,
+        "token_id": 524,
+        "token_str": " not",
+        "logit": 13.75,
+        "probability": 0.046878
+      },
+      "engine": {
+        "rank": 4,
+        "token_id": 2400,
+        "token_str": " full",
+        "logit": 14.3364,
+        "probability": 0.0620279
+      },
+      "rank_match": false
+    },
+    {
+      "rank": 5,
+      "hf_ref": {
+        "rank": 5,
+        "token_id": 6121,
+        "token_str": " dark",
+        "logit": 13.6875,
+        "probability": 0.044038
+      },
+      "engine": {
+        "rank": 5,
+        "token_id": 524,
+        "token_str": " not",
+        "logit": 14.2634,
+        "probability": 0.0576611
+      },
+      "rank_match": false
+    },
+    {
+      "rank": 6,
+      "hf_ref": {
+        "rank": 6,
+        "token_id": 2708,
+        "token_str": " clear",
+        "logit": 13.5,
+        "probability": 0.036508
+      },
+      "engine": {
+        "rank": 6,
+        "token_id": 2708,
+        "token_str": " clear",
+        "logit": 13.8414,
+        "probability": 0.0378089
+      },
+      "rank_match": true
+    },
+    {
+      "rank": 7,
+      "hf_ref": {
+        "rank": 7,
+        "token_id": 2400,
+        "token_str": " full",
+        "logit": 13.3125,
+        "probability": 0.030267
+      },
+      "engine": {
+        "rank": 7,
+        "token_id": 6121,
+        "token_str": " dark",
+        "logit": 13.7619,
+        "probability": 0.0349198
+      },
+      "rank_match": false
+    },
+    {
+      "rank": 8,
+      "hf_ref": {
+        "rank": 8,
+        "token_id": 9896,
+        "token_str": " filled",
+        "logit": 12.625,
+        "probability": 0.015219
+      },
+      "engine": {
+        "rank": 8,
+        "token_id": 9896,
+        "token_str": " filled",
+        "logit": 12.971,
+        "probability": 0.015835
+      },
+      "rank_match": true
+    },
+    {
+      "rank": 9,
+      "hf_ref": {
+        "rank": 9,
+        "token_id": 3428,
+        "token_str": " often",
+        "logit": 12.5625,
+        "probability": 0.014297
+      },
+      "engine": {
+        "rank": 9,
+        "token_id": 1040,
+        "token_str": " like",
+        "logit": 12.6365,
+        "probability": 0.0113331
+      },
+      "rank_match": false
+    },
+    {
+      "rank": 10,
+      "hf_ref": {
+        "rank": 10,
+        "token_id": 19177,
+        "token_str": " grey",
+        "logit": 12.5625,
+        "probability": 0.014297
+      },
+      "engine": {
+        "rank": 10,
+        "token_id": 748,
+        "token_str": " so",
+        "logit": 12.5379,
+        "probability": 0.0102684
+      },
+      "rank_match": false
+    }
+  ]
+}

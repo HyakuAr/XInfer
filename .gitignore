@@ -97,3 +97,6 @@ ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
 .DS_Store
+
+# Regenerable binary parity data
+*.npy
