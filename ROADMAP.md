@@ -228,6 +228,7 @@ rigorously evaluate the GEMM/GEMV strategy on Intel Arc Pro B60 hardware.
 - [x] Hardware matrix capabilities queried on real B60 and documented in `docs/vendor/b60-matrix-caps.md`.
 - [x] Vector Engine INT4 GEMV and attention kernels pass the same oracle tests as M4 (`tests/test_ops_oracle.cpp`).
 - [x] Measured, documented speedup over the naive baseline at end-to-end decode level:
+  - **Verified Build Configuration:** `Release` (`/O3`, Intel oneAPI DPC++/C++ icx 2026.1.0, Level Zero backend).
   - INT4 Linear microbenchmark at MLP shape (M=1, N=17408, K=5120): **0.120 ms** per projection (45x+ speedup over naive, **383.7 GB/s** effective memory bandwidth on Arc Pro B60). This is the peak single-shape result at full GPU occupancy (8,704 sub-groups); smaller projection shapes achieve lower bandwidth due to thread under-occupancy (see M10 bandwidth gap analysis).
   - End-to-end decode speed: improved from **0.226 tok/s** to **0.350 tok/s** (55% end-to-end speedup, producing identical tokens: `760 12515 7701 6105 4016 310 264 24057 2512 2972`).
   - Analysis: Individual kernel execution latency dropped by 45x; the remaining bottleneck at this stage was the cumulative host driver submission latency across ~1,000 separate SYCL kernel launches per token (~2.5s), targeted for elimination in M8.
@@ -252,6 +253,7 @@ per-step launch overhead.
 **DoD:**
 - [x] Decode step runs via captured/replayed command list (`src/targets/qwen3_8/decode_graph.h/cpp` using Level Zero-backed `sycl::ext::oneapi::experimental::command_graph`).
 - [x] Measured latency improvement documented:
+  - **Verified Build Configuration:** `Release` (`/O3`, Intel oneAPI DPC++/C++ icx 2026.1.0, Level Zero backend).
   - Unit test verification (`tests/test_decode_graph.cpp`): 100% pass on Intel Arc Pro B60 with dynamic device position updates.
   - End-to-end decode execution (`apps/xinfer/main.cpp`): Captured all 64 layers into a single executable command graph (`[DecodeGraph] Successfully captured and finalized 64-layer decode graph!`).
   - Single-token decode execution time: **2.87 s/tok** (**0.348 tok/s**), eliminating CPU kernel-submission overhead across ~1,000 launches per token.
@@ -348,9 +350,10 @@ device execution duration of each kernel during continuous asynchronous executio
    - All non-linear operations combined now take only **64.10 ms** (10.36% of the token step).
 
 *Re-measured Results on Intel Arc Pro B60:*
+- **Verified Build Configuration:** `Release` (`/O3`, Intel oneAPI DPC++/C++ icx 2026.1.0, Level Zero backend).
 - DecodeGraph replay latency: dropped from **2,863.21 ms** to **619.82 ms** (**4.62x speedup**).
 - End-to-end token generation throughput: improved from **0.348 tok/s** to **1.613 tok/s**.
-- Full test suite verification: 100% pass across all 6 CTest suites (including numerical oracle tests).
+- Full test suite verification: 100% pass across all 13 CTest suites (including numerical oracle and parity diagnostics).
 
 *Bandwidth Gap: M7 Microbenchmark (383.7 GB/s) vs. Decode-Step Aggregate (~28.5 GB/s):*
 - M7's 383.7 GB/s was measured at **one shape** (M=1, N=17408, K=5120 — the MLP gate/up projection), which launches 8,704 sub-groups and fully saturates the B60's 1,280 hardware threads. This is the kernel's peak capability at high occupancy.

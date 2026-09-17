@@ -14,6 +14,9 @@ using namespace xinfer;
 int main(int argc, char** argv) {
     std::cout << "==================================================================" << std::endl;
     std::cout << "  xInfer Memory Residency & PCIe Activity Diagnostic Tool         " << std::endl;
+#ifdef XINFER_BUILD_CONFIG
+    std::cout << "  Build Config: " << XINFER_BUILD_CONFIG << std::endl;
+#endif
     std::cout << "==================================================================" << std::endl;
 
     auto ctx = core::DeviceContext::create(true);

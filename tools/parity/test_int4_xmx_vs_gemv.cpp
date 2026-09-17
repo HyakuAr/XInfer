@@ -215,7 +215,10 @@ int main() {
     auto dev = q.get_device();
     std::cout << "==================================================================" << std::endl;
     std::cout << "  Microbenchmark: Vector Engine GEMV vs INT4-Unpack+XMX Joint Matrix" << std::endl;
-    std::cout << "  Device: " << dev.get_info<sycl::info::device::name>() << std::endl;
+    std::cout << "  Device:       " << dev.get_info<sycl::info::device::name>() << std::endl;
+#ifdef XINFER_BUILD_CONFIG
+    std::cout << "  Build Config: " << XINFER_BUILD_CONFIG << std::endl;
+#endif
     std::cout << "==================================================================" << std::endl;
 
     const int64_t M = 1;

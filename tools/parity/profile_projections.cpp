@@ -38,6 +38,9 @@ struct ProjectionMetrics {
 int main(int argc, char** argv) {
     std::cout << "==================================================================" << std::endl;
     std::cout << "  xInfer INT4 Linear GEMV Per-Projection Bandwidth Profiler        " << std::endl;
+#ifdef XINFER_BUILD_CONFIG
+    std::cout << "  Build Config: " << XINFER_BUILD_CONFIG << std::endl;
+#endif
     std::cout << "==================================================================" << std::endl;
 
     std::string artifact_path = (argc > 1) ? argv[1] : "out/qwen3_8_27b.xinfer";

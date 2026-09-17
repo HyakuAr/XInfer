@@ -176,7 +176,12 @@ void test_streaming_sse_event_serialization() {
     std::string json_part = sse.substr(6, sse.size() - 8);
     JsonValue root;
     std::string err;
-    assert(parse_json(json_part, root, err));
+    bool parse_ok = parse_json(json_part, root, err);
+    assert(parse_ok);
+    if (!parse_ok) {
+        std::cerr << "Failed to parse SSE JSON: " << err << "\nJSON: " << json_part << std::endl;
+        std::exit(1);
+    }
     assert(root.get_string("object") == "chat.completion.chunk");
     assert(root.get_string("id") == "chatcmpl-stream123");
 
@@ -242,7 +247,8 @@ void test_utf16_surrogate_pairs() {
     std::string req_json = "{\"messages\": [{\"role\": \"user\", \"content\": \"Hello \\uD83D\\uDC4B\\uD83C\\uDF0D\"}]}";
     ChatCompletionRequest req;
     ApiError api_err;
-    assert(parse_chat_completion_request(req_json, req, api_err));
+    bool parse_req_ok = parse_chat_completion_request(req_json, req, api_err);
+    assert(parse_req_ok);
     assert(req.messages.size() == 1);
     // 👋 (U+1F44B: \xF0\x9F\x91\x8B) + 🌍 (U+1F30D: \xF0\x9F\x8C\x8D)
     assert(req.messages[0].content == "Hello \xF0\x9F\x91\x8B\xF0\x9F\x8C\x8D");
@@ -269,14 +275,16 @@ void test_top_p_parsing() {
     std::string json_def = "{\"messages\": [{\"role\": \"user\", \"content\": \"hi\"}]}";
     ChatCompletionRequest req_def;
     ApiError err_def;
-    assert(parse_chat_completion_request(json_def, req_def, err_def));
+    bool parse_def_ok = parse_chat_completion_request(json_def, req_def, err_def);
+    assert(parse_def_ok);
     assert(std::abs(req_def.top_p - 1.0f) < 1e-4);
 
     // Explicit top_p
     std::string json_p = "{\"messages\": [{\"role\": \"user\", \"content\": \"hi\"}], \"top_p\": 0.95}";
     ChatCompletionRequest req_p;
     ApiError err_p;
-    assert(parse_chat_completion_request(json_p, req_p, err_p));
+    bool parse_p_ok = parse_chat_completion_request(json_p, req_p, err_p);
+    assert(parse_p_ok);
     assert(std::abs(req_p.top_p - 0.95f) < 1e-4);
 
     std::cout << "  -> PASSED: top_p parameter correctly parsed." << std::endl;

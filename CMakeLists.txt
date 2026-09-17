@@ -5,11 +5,52 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Common compiler flags for MSVC-compatible compilers (icx-cl / cl)
+# Default to Release build type for reproducible performance numbers
+if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the build type (Debug, Release, RelWithDebInfo, MinSizeRel)." FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "RelWithDebInfo" "MinSizeRel")
+endif()
+
+# Explicit optimization and compiler flags for reproducibility
 if (MSVC)
     add_compile_options(/EHsc /W4)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+    if (CMAKE_BUILD_TYPE STREQUAL "Release")
+        set(XINFER_OPT_FLAG "/O3")
+        add_compile_options(/O3)
+    elseif (CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+        set(XINFER_OPT_FLAG "/O2 /Zi")
+        add_compile_options(/O2 /Zi)
+    elseif (CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(XINFER_OPT_FLAG "/Od /Zi")
+        add_compile_options(/Od /Zi)
+    endif()
+else()
+    if (CMAKE_BUILD_TYPE STREQUAL "Release")
+        set(XINFER_OPT_FLAG "-O3")
+        add_compile_options(-O3)
+    elseif (CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+        set(XINFER_OPT_FLAG "-O2 -g")
+        add_compile_options(-O2 -g)
+    elseif (CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(XINFER_OPT_FLAG "-O0 -g")
+        add_compile_options(-O0 -g)
+    endif()
 endif()
+
+# Record build configuration string for diagnostics and benchmark reproducibility
+set(XINFER_BUILD_CONFIG_STR "${CMAKE_BUILD_TYPE} [${XINFER_OPT_FLAG}] (Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION})")
+add_compile_definitions(
+    XINFER_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
+    XINFER_BUILD_CONFIG="${XINFER_BUILD_CONFIG_STR}"
+)
+
+message(STATUS "xInfer Build Configuration:")
+message(STATUS "  Build Type:       ${CMAKE_BUILD_TYPE}")
+message(STATUS "  Compiler:         ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+message(STATUS "  C++ Standard:     C++${CMAKE_CXX_STANDARD}")
+
+enable_testing()
 
 # Core artifact library (CPU-only, no SYCL/GPU dependency)
 add_library(xinfer_artifact STATIC
@@ -39,6 +80,7 @@ add_executable(test_artifact_roundtrip
 target_link_libraries(test_artifact_roundtrip PRIVATE
     xinfer_artifact
 )
+add_test(NAME ArtifactRoundTrip COMMAND test_artifact_roundtrip)
 
 # Milestone 2: Artifact inspection and parity verification tool
 add_executable(verify_artifact
@@ -74,20 +116,7 @@ target_link_libraries(test_core_device PRIVATE
 target_compile_options(test_core_device PRIVATE -fsycl)
 target_link_options(test_core_device PRIVATE -fsycl)
 
-add_executable(test_kv_cache
-    tests/test_kv_cache.cpp
-)
-target_link_libraries(test_kv_cache PRIVATE
-    xinfer_core
-    xinfer_ops
-)
-target_compile_options(test_kv_cache PRIVATE -fsycl)
-target_link_options(test_kv_cache PRIVATE -fsycl)
-
-enable_testing()
-add_test(NAME ArtifactRoundTrip COMMAND test_artifact_roundtrip)
 add_test(NAME CoreDeviceTest COMMAND test_core_device)
-add_test(NAME KVCacheTest COMMAND test_kv_cache)
 
 # Milestone 4: Naive correctness kernels (no XMX yet)
 add_library(xinfer_ops STATIC
@@ -211,6 +240,60 @@ target_link_options(test_chat_template PRIVATE -fsycl)
 
 add_test(NAME ChatTemplateTest COMMAND test_chat_template)
 
+# Milestone 6: KV Cache + Chunked Prefill
+# Sequentially placed after xinfer_core and xinfer_ops dependencies are defined
+add_executable(test_kv_cache
+    tests/test_kv_cache.cpp
+)
+target_link_libraries(test_kv_cache PRIVATE
+    xinfer_core
+    xinfer_ops
+)
+target_compile_options(test_kv_cache PRIVATE -fsycl)
+target_link_options(test_kv_cache PRIVATE -fsycl)
+
+add_test(NAME KVCacheTest COMMAND test_kv_cache)
+
+# Milestone 7: Accelerated Linear (GEMV) & Matrix Strategy (Parity Diagnostics)
+add_executable(query_matrix_caps
+    tools/parity/query_matrix_caps.cpp
+)
+target_compile_options(query_matrix_caps PRIVATE -fsycl)
+target_link_options(query_matrix_caps PRIVATE -fsycl)
+
+add_executable(test_int4_xmx_vs_gemv
+    tools/parity/test_int4_xmx_vs_gemv.cpp
+)
+target_compile_options(test_int4_xmx_vs_gemv PRIVATE -fsycl)
+target_link_options(test_int4_xmx_vs_gemv PRIVATE -fsycl)
+
+add_test(NAME QueryMatrixCaps COMMAND query_matrix_caps)
+add_test(NAME Int4XmxVsGemv COMMAND test_int4_xmx_vs_gemv)
+
+# Milestone 8: Level Zero Command-List Graph Capture/Replay for Decode (Parity Diagnostics)
+add_executable(test_graph_micro
+    tools/parity/test_graph_micro.cpp
+)
+target_compile_options(test_graph_micro PRIVATE -fsycl)
+target_link_options(test_graph_micro PRIVATE -fsycl)
+
+add_executable(test_graph_dynamic_pos
+    tools/parity/test_graph_dynamic_pos.cpp
+)
+target_include_directories(test_graph_dynamic_pos PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(test_graph_dynamic_pos PRIVATE
+    xinfer_targets
+    xinfer_runtime
+)
+target_compile_options(test_graph_dynamic_pos PRIVATE -fsycl)
+target_link_options(test_graph_dynamic_pos PRIVATE -fsycl)
+
+add_test(NAME GraphMicro COMMAND test_graph_micro)
+add_test(NAME GraphDynamicPos COMMAND test_graph_dynamic_pos)
+
 # Milestone 9: OpenAI-Compatible HTTP Serving
 add_library(xinfer_serve STATIC
     src/serve/protocol.cpp
@@ -254,6 +337,14 @@ target_link_options(test_serve_schema PRIVATE -fsycl)
 add_test(NAME ServeSchemaTest COMMAND test_serve_schema)
 
 # Milestone 10: Performance Diagnostic & Profiler
+add_executable(test_profiling_events
+    tools/parity/test_profiling_events.cpp
+)
+target_compile_options(test_profiling_events PRIVATE -fsycl)
+target_link_options(test_profiling_events PRIVATE -fsycl)
+
+add_test(NAME ProfilingEvents COMMAND test_profiling_events)
+
 add_executable(profile_decode_step
     tools/parity/profile_decode_step.cpp
 )

@@ -79,6 +79,9 @@ struct OpCategoryTimers {
 int main() {
     std::cout << "==================================================================" << std::endl;
     std::cout << " xinfer M10 Performance Diagnostic: Detailed Decode Step Profiler" << std::endl;
+#ifdef XINFER_BUILD_CONFIG
+    std::cout << " Build Config: " << XINFER_BUILD_CONFIG << std::endl;
+#endif
     std::cout << "==================================================================" << std::endl;
 
     auto ctx = core::DeviceContext::create(true);

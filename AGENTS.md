@@ -145,8 +145,9 @@ Every kernel that touches model math needs one independent oracle:
   suspected to be the bottleneck and a profiling answer could change a
   design decision — not as a blanket first step.
 - Record enough context to interpret a result (device, driver version,
-  model/quant config, workload) without needing full raw profiler dumps by
-  default.
+  build configuration / optimization flags e.g. Release /O3, model/quant
+  config, workload) without needing full raw profiler dumps by default.
+  Always record the exact build configuration alongside every benchmark number.
 
 ## 9. Tests and verification
 
