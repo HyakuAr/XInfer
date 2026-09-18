@@ -206,6 +206,83 @@ int main() {
         std::cout << "[PASS] k_cache_int8(0) on FP16 cache threw std::logic_error as expected\n";
     }
 
+    // ==========================================
+    // Test INT8 write, dequantize read, and cached SDPA
+    // ==========================================
+    std::cout << "\n--- Testing INT8 KV Write, Read & Cached SDPA Kernels ---\n";
+    std::vector<float> h_k_int8(num_tokens * num_kv_heads * head_dim);
+    std::vector<float> h_v_int8(num_tokens * num_kv_heads * head_dim);
+    for (size_t idx = 0; idx < h_k_int8.size(); ++idx) {
+        size_t d = idx % head_dim;
+        float base = (d == 0) ? 10.0f : (d == 1 ? -5.0f : static_cast<float>(d % 7) * 0.1f);
+        h_k_int8[idx] = base;
+        h_v_int8[idx] = base * 0.5f;
+    }
+
+    float* d_k_in = sycl::malloc_device<float>(h_k_int8.size(), q);
+    float* d_v_in = sycl::malloc_device<float>(h_v_int8.size(), q);
+    q.memcpy(d_k_in, h_k_int8.data(), h_k_int8.size() * sizeof(float));
+    q.memcpy(d_v_in, h_v_int8.data(), h_v_int8.size() * sizeof(float));
+    q.wait();
+
+    // Write to layer 0 INT8 cache
+    xinfer::ops::attention_write_kv_cache_int8(
+        q, int8_cache.k_cache_int8(0), int8_cache.v_cache_int8(0),
+        int8_cache.k_scale(0), int8_cache.v_scale(0),
+        int8_cache.k_zero_point(0), int8_cache.v_zero_point(0),
+        d_k_in, d_v_in, 0, num_tokens, num_kv_heads, head_dim);
+    q.wait();
+
+    // Test dequantized read
+    float* d_k_deq = sycl::malloc_device<float>(h_k_int8.size(), q);
+    float* d_v_deq = sycl::malloc_device<float>(h_v_int8.size(), q);
+    xinfer::ops::attention_read_kv_cache_int8(
+        q, d_k_deq, d_v_deq,
+        int8_cache.k_cache_int8(0), int8_cache.v_cache_int8(0),
+        int8_cache.k_scale(0), int8_cache.v_scale(0),
+        int8_cache.k_zero_point(0), int8_cache.v_zero_point(0),
+        0, num_tokens, num_kv_heads, head_dim);
+    q.wait();
+
+    std::vector<float> h_k_deq(h_k_int8.size());
+    q.memcpy(h_k_deq.data(), d_k_deq, h_k_deq.size() * sizeof(float)).wait();
+
+    float max_k_err = 0.0f;
+    for (size_t idx = 0; idx < h_k_int8.size(); ++idx) {
+        float err = std::abs(h_k_int8[idx] - h_k_deq[idx]);
+        if (err > max_k_err) max_k_err = err;
+    }
+    std::cout << "[PASS] INT8 KV write and dequantized read max error: " << max_k_err << " (within INT8 tolerance)\n";
+    if (max_k_err > 0.1f) {
+        std::cerr << "FAILED: INT8 quantization error too high: " << max_k_err << "\n";
+        return 1;
+    }
+
+    // Run INT8 cached SDPA
+    float* d_out_int8 = sycl::malloc_device<float>(1 * num_q_heads * head_dim, q);
+    float* d_q_in = sycl::malloc_device<float>(1 * num_q_heads * head_dim, q);
+    std::vector<float> h_q_in(1 * num_q_heads * head_dim, 0.05f);
+    q.memcpy(d_q_in, h_q_in.data(), h_q_in.size() * sizeof(float)).wait();
+
+    xinfer::ops::sdpa_causal_cached_int8(
+        q, d_out_int8, d_q_in,
+        int8_cache.k_cache_int8(0), int8_cache.v_cache_int8(0),
+        int8_cache.k_scale(0), int8_cache.v_scale(0),
+        int8_cache.k_zero_point(0), int8_cache.v_zero_point(0),
+        3, 1, num_q_heads, num_kv_heads, head_dim);
+    q.wait();
+
+    std::vector<float> h_out_int8(1 * num_q_heads * head_dim);
+    q.memcpy(h_out_int8.data(), d_out_int8, h_out_int8.size() * sizeof(float)).wait();
+    std::cout << "[PASS] Cached INT8 SDPA executed successfully, sample output val: " << h_out_int8[0] << "\n";
+
+    sycl::free(d_k_in, q);
+    sycl::free(d_v_in, q);
+    sycl::free(d_k_deq, q);
+    sycl::free(d_v_deq, q);
+    sycl::free(d_out_int8, q);
+    sycl::free(d_q_in, q);
+
     std::cout << "\nAll KVCache tests PASSED!\n";
     return 0;
 }
