@@ -6,8 +6,16 @@
 #include "targets/qwen3_8_27b/weights.h"
 #include <vector>
 #include <cstdint>
+#include <stdexcept>
+#include <string>
 
 namespace xinfer::targets::qwen3_8 {
+
+class context_length_exceeded : public std::runtime_error {
+public:
+    explicit context_length_exceeded(const std::string& msg = "context_length_exceeded")
+        : std::runtime_error(msg) {}
+};
 
 // Looks up BF16 token embeddings and writes FP16/FP32 activations
 // vocab_size: bounds check limit (0 = unbounded, defaults to ModelConfig::kDefaultVocabSize)

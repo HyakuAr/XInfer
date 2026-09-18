@@ -132,24 +132,58 @@ void forward_layer(sycl::queue& q,
         ops::rope(q, bufs.act_q, bufs.act_k, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, d_positions, cfg.rope_theta, cfg.rope_dim);
 
         // Write K and V into KV cache and perform Causal SDPA
-        if (d_dynamic_pos) {
-            ops::attention_write_kv_cache_dynamic(q, kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
-                                                  bufs.act_k, bufs.act_v, d_dynamic_pos, seq_len, cfg.num_key_value_heads, head_dim,
-                                                  static_cast<int64_t>(kv_cache.max_seq_len()));
+        if (kv_cache.is_int8()) {
+            if (d_dynamic_pos) {
+                ops::attention_write_kv_cache_int8_dynamic(
+                    q, kv_cache.k_cache_int8(full_idx), kv_cache.v_cache_int8(full_idx),
+                    kv_cache.k_scale(full_idx), kv_cache.v_scale(full_idx),
+                    kv_cache.k_zero_point(full_idx), kv_cache.v_zero_point(full_idx),
+                    bufs.act_k, bufs.act_v, d_dynamic_pos, seq_len, cfg.num_key_value_heads, head_dim,
+                    static_cast<int64_t>(kv_cache.max_seq_len()));
 
-            ops::sdpa_causal_cached_dynamic(q, bufs.act_attn_out, bufs.act_q,
-                                            kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
-                                            d_dynamic_pos, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, 0.0f,
-                                            static_cast<int64_t>(kv_cache.max_seq_len()));
+                ops::sdpa_causal_cached_int8_dynamic(
+                    q, bufs.act_attn_out, bufs.act_q,
+                    kv_cache.k_cache_int8(full_idx), kv_cache.v_cache_int8(full_idx),
+                    kv_cache.k_scale(full_idx), kv_cache.v_scale(full_idx),
+                    kv_cache.k_zero_point(full_idx), kv_cache.v_zero_point(full_idx),
+                    d_dynamic_pos, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, 0.0f,
+                    static_cast<int64_t>(kv_cache.max_seq_len()));
+            } else {
+                ops::attention_write_kv_cache_int8(
+                    q, kv_cache.k_cache_int8(full_idx), kv_cache.v_cache_int8(full_idx),
+                    kv_cache.k_scale(full_idx), kv_cache.v_scale(full_idx),
+                    kv_cache.k_zero_point(full_idx), kv_cache.v_zero_point(full_idx),
+                    bufs.act_k, bufs.act_v, start_pos, seq_len, cfg.num_key_value_heads, head_dim,
+                    static_cast<int64_t>(kv_cache.max_seq_len()));
+
+                ops::sdpa_causal_cached_int8(
+                    q, bufs.act_attn_out, bufs.act_q,
+                    kv_cache.k_cache_int8(full_idx), kv_cache.v_cache_int8(full_idx),
+                    kv_cache.k_scale(full_idx), kv_cache.v_scale(full_idx),
+                    kv_cache.k_zero_point(full_idx), kv_cache.v_zero_point(full_idx),
+                    start_pos, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, 0.0f,
+                    static_cast<int64_t>(kv_cache.max_seq_len()));
+            }
         } else {
-            ops::attention_write_kv_cache(q, kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
-                                          bufs.act_k, bufs.act_v, start_pos, seq_len, cfg.num_key_value_heads, head_dim,
-                                          static_cast<int64_t>(kv_cache.max_seq_len()));
+            if (d_dynamic_pos) {
+                ops::attention_write_kv_cache_dynamic(q, kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
+                                                      bufs.act_k, bufs.act_v, d_dynamic_pos, seq_len, cfg.num_key_value_heads, head_dim,
+                                                      static_cast<int64_t>(kv_cache.max_seq_len()));
 
-            ops::sdpa_causal_cached(q, bufs.act_attn_out, bufs.act_q,
-                                    kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
-                                    start_pos, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, 0.0f,
-                                    static_cast<int64_t>(kv_cache.max_seq_len()));
+                ops::sdpa_causal_cached_dynamic(q, bufs.act_attn_out, bufs.act_q,
+                                                kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
+                                                d_dynamic_pos, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, 0.0f,
+                                                static_cast<int64_t>(kv_cache.max_seq_len()));
+            } else {
+                ops::attention_write_kv_cache(q, kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
+                                              bufs.act_k, bufs.act_v, start_pos, seq_len, cfg.num_key_value_heads, head_dim,
+                                              static_cast<int64_t>(kv_cache.max_seq_len()));
+
+                ops::sdpa_causal_cached(q, bufs.act_attn_out, bufs.act_q,
+                                        kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
+                                        start_pos, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, 0.0f,
+                                        static_cast<int64_t>(kv_cache.max_seq_len()));
+            }
         }
 
         // Output gating: attn_out *= sigmoid(gate) matching torch.sigmoid(gate)
@@ -328,9 +362,10 @@ int64_t prefill_prompt(std::shared_ptr<core::DeviceContext> ctx,
                        size_t chunk_size) {
     if (prompt_tokens.empty()) return 0;
     if (prompt_tokens.size() > kv_cache.max_seq_len()) {
-        std::cerr << "[xinfer::qwen3_8] Error: Prompt tokens (" << prompt_tokens.size()
-                  << ") exceeds KV cache max_seq_len (" << kv_cache.max_seq_len() << ")" << std::endl;
-        return -1;
+        std::string err = "context_length_exceeded: Prompt tokens (" + std::to_string(prompt_tokens.size()) +
+                          ") exceeds KV cache max_seq_len (" + std::to_string(kv_cache.max_seq_len()) + ")";
+        std::cerr << "[xinfer::qwen3_8] Error: " << err << std::endl;
+        throw context_length_exceeded(err);
     }
     const auto& cfg = model.config();
     for (size_t i = 0; i < prompt_tokens.size(); ++i) {
@@ -349,6 +384,7 @@ int64_t prefill_prompt(std::shared_ptr<core::DeviceContext> ctx,
 
     size_t total_tokens = prompt_tokens.size();
     size_t offset = 0;
+    int64_t start_pos = 0;
 
     while (offset < total_tokens) {
         size_t cur_chunk = std::min(chunk_size, total_tokens - offset);
@@ -358,10 +394,11 @@ int64_t prefill_prompt(std::shared_ptr<core::DeviceContext> ctx,
         forward_chunk(ctx, arena, model, kv_cache,
                       prompt_tokens.data() + offset,
                       cur_chunk,
-                      offset,
+                      start_pos,
                       zero_linear,
                       is_last ? d_logits : nullptr);
 
+        start_pos += static_cast<int64_t>(cur_chunk);
         offset += cur_chunk;
     }
 
