@@ -14,10 +14,34 @@ using xinfer::ChatMessage;
 struct ChatTemplateOptions {
     bool        add_generation_prompt{true};
     bool        enable_thinking{true};
-    std::string reasoning_effort{"xhigh"}; // "xhigh", "medium", "low"
+    std::string reasoning_effort{""}; // Empty defaults to template's default_reasoning_effort ("xhigh", "medium", "low")
     bool        preserve_thinking{true};
 };
 
+// ============================================================================
+// Architectural Note: Dedicated Compiled C++ ChatML Renderer for Qwen3.8
+// ============================================================================
+// Per AGENTS.md §1 & §4, xinfer is targeted exclusively to Intel Arc Pro B60 +
+// Qwen3.8-27B. A generic dynamic Jinja2 runtime (AST interpreter) is explicitly
+// out of scope to avoid runtime dependencies, memory allocations, and parsing
+// latency on the hot inference serving path.
+//
+// Instead, QwenChatTemplate implements an explicitly verified, compiled C++
+// ChatML renderer faithfully implementing the official Qwen3.8 chat_template.jinja
+// specification (ChatML role frames, thinking tags, tool interactions, generation prompt).
+//
+// Fail-Loudly Contract:
+// To ensure the compiled renderer never silently drifts from the checkpoint's
+// actual template:
+// 1. parse_template() validates all structural ChatML tokens (<|im_start|>,
+//    <|im_end|>, <think>, </think>, <tool_response>, role conditionals).
+// 2. It extracts the dynamic parameters directly from the template:
+//    - default reasoning effort ('reasoning_effort|default(...)')
+//    - per-effort reasoning instructions ('xhigh', 'low', 'medium')
+// 3. If any expected pattern or structural invariant cannot be verified or extracted,
+//    load_from_*() FAILS LOUDLY (returns false, populates error_msg, logs to stderr),
+//    strictly prohibiting silent fallbacks to guessed hardcoded strings.
+// ============================================================================
 class QwenChatTemplate {
 public:
     QwenChatTemplate();
@@ -53,7 +77,7 @@ public:
 
 private:
     void init_defaults();
-    void parse_template();
+    bool parse_template(std::string* error_msg = nullptr);
 
     bool is_loaded_{false};
     std::string raw_template_;

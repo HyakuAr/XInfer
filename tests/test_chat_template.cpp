@@ -29,7 +29,7 @@ using xinfer::ChatMessage;
     } while (0)
 
 int test_default_template() {
-    std::cout << "[Test 1/5] Testing default chat template..." << std::endl;
+    std::cout << "[Test 1/6] Testing default chat template..." << std::endl;
     QwenChatTemplate tmpl;
 
     // Single turn user prompt
@@ -60,7 +60,7 @@ int test_default_template() {
 }
 
 int test_multiturn_and_reasoning() {
-    std::cout << "[Test 2/5] Testing multi-turn and assistant reasoning_content..." << std::endl;
+    std::cout << "[Test 2/6] Testing multi-turn and assistant reasoning_content..." << std::endl;
     QwenChatTemplate tmpl;
 
     // Multi-turn without assistant reasoning_content
@@ -113,7 +113,7 @@ int test_multiturn_and_reasoning() {
 }
 
 int test_template_options() {
-    std::cout << "[Test 3/5] Testing template options (enable_thinking, reasoning_effort, add_generation_prompt)..." << std::endl;
+    std::cout << "[Test 3/6] Testing template options (enable_thinking, reasoning_effort, add_generation_prompt)..." << std::endl;
     QwenChatTemplate tmpl;
     std::vector<ChatMessage> msgs = {{"user", "Hello!", ""}};
 
@@ -169,7 +169,7 @@ int test_template_options() {
 }
 
 int test_load_from_file_and_artifact() {
-    std::cout << "[Test 4/5] Testing loading real chat_template.jinja from checkpoint and artifact..." << std::endl;
+    std::cout << "[Test 4/6] Testing loading real chat_template.jinja from checkpoint and artifact..." << std::endl;
 
     // 1. From checkpoint file
     std::filesystem::path checkpoint_dir = xinfer::test::get_checkpoint_dir();
@@ -235,7 +235,7 @@ int test_load_from_file_and_artifact() {
 }
 
 int test_error_handling() {
-    std::cout << "[Test 5/5] Testing error handling (fail-loudly)..." << std::endl;
+    std::cout << "[Test 5/6] Testing error handling (fail-loudly)..." << std::endl;
     QwenChatTemplate tmpl;
 
     // 1. Empty messages
@@ -299,6 +299,118 @@ int test_error_handling() {
     return 0;
 }
 
+int test_template_parsing_and_validation() {
+    std::cout << "[Test 6/6] Testing template parsing, fail-loudly validation, and custom template driving..." << std::endl;
+    QwenChatTemplate tmpl;
+
+    // 1. Empty template loading must fail loudly
+    {
+        std::string err;
+        bool ok = tmpl.load_from_string("", &err);
+        ASSERT_TRUE(!ok, "Loading empty template string must return false");
+        ASSERT_TRUE(!tmpl.is_loaded(), "is_loaded() must be false after failed load");
+        ASSERT_TRUE(err.find("Empty chat template") != std::string::npos, "Must report 'Empty chat template'");
+    }
+
+    // 2. Non-ChatML template (e.g. Llama-3 format) must fail structural validation loudly
+    {
+        std::string llama_template =
+            "{{- '<|start_header_id|>' + message['role'] + '<|end_header_id|>' -}}\n"
+            "{{- message['content'] -}}\n"
+            "{{- '<|eot_id|>' -}}";
+        std::string err;
+        bool ok = tmpl.load_from_string(llama_template, &err);
+        ASSERT_TRUE(!ok, "Loading non-ChatML template must return false");
+        ASSERT_TRUE(!tmpl.is_loaded(), "is_loaded() must be false after failed load");
+        ASSERT_TRUE(err.find("Template structural validation failed") != std::string::npos,
+                    "Must report structural validation failure");
+    }
+
+    // 3. Template missing default reasoning effort pattern must fail loudly
+    {
+        std::string missing_default_tmpl =
+            "<|im_start|>system\n{{ content }}<|im_end|>\n"
+            "<think>{{ reasoning }}</think>\n"
+            "{% if add_generation_prompt %}{% endif %}\n"
+            "{% if enable_thinking %}{% endif %}\n"
+            "{% if multi_step_tool %}<tool_response></tool_response>{% endif %}\n"
+            "{% for message in messages %}{{ system }} {{ user }} {{ assistant }}{% endfor %}\n";
+        std::string err;
+        bool ok = tmpl.load_from_string(missing_default_tmpl, &err);
+        ASSERT_TRUE(!ok, "Template missing default reasoning effort must return false");
+        ASSERT_TRUE(!tmpl.is_loaded(), "is_loaded() must be false");
+        ASSERT_TRUE(err.find("default reasoning effort") != std::string::npos,
+                    "Must report failure to extract default reasoning effort");
+    }
+
+    // 4. Template missing reasoning instructions for 'xhigh' must fail loudly
+    {
+        std::string missing_xhigh_tmpl =
+            "<|im_start|>system\n{{ content }}<|im_end|>\n"
+            "<think>{{ reasoning }}</think>\n"
+            "{% if add_generation_prompt %}{% endif %}\n"
+            "{% if enable_thinking %}{% endif %}\n"
+            "{% if multi_step_tool %}<tool_response></tool_response>{% endif %}\n"
+            "{% for message in messages %}{{ system }} {{ user }} {{ assistant }}{% endfor %}\n"
+            "{% set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}\n"
+            "{% if resolved_reasoning_effort == 'low' %}\n"
+            "    {% set reasoning_instructions = 'Brief thinking.' %}\n"
+            "{% endif %}\n";
+        std::string err;
+        bool ok = tmpl.load_from_string(missing_xhigh_tmpl, &err);
+        ASSERT_TRUE(!ok, "Template missing xhigh instructions must return false");
+        ASSERT_TRUE(!tmpl.is_loaded(), "is_loaded() must be false");
+        ASSERT_TRUE(err.find("effort 'xhigh'") != std::string::npos,
+                    "Must report failure to extract reasoning instructions for xhigh");
+    }
+
+    // 5. Valid template with custom instructions and default effort driving the renderer
+    {
+        std::string custom_template =
+            "<|im_start|>system\n"
+            "{% set reasoning_instructions = '' %}\n"
+            "{% if enable_thinking is undefined or enable_thinking is true %}\n"
+            "    {% set resolved_reasoning_effort = reasoning_effort | default( 'low' ) %}\n"
+            "    {% if resolved_reasoning_effort == 'xhigh' %}\n"
+            "        {% set reasoning_instructions = 'CUSTOM_XHIGH_INSTRUCTION_ALPHA' %}\n"
+            "    {% elif resolved_reasoning_effort == 'low' %}\n"
+            "        {% set reasoning_instructions = 'CUSTOM_LOW_INSTRUCTION_BETA' %}\n"
+            "    {% endif %}\n"
+            "{% endif %}\n"
+            "<think>{{ reasoning }}</think>\n"
+            "{% if add_generation_prompt %}{% endif %}\n"
+            "{% if multi_step_tool %}<tool_response></tool_response>{% endif %}\n"
+            "{% for message in messages %}<|im_start|>{{ message.role }}{{ system }} {{ user }} {{ assistant }}<|im_end|>{% endfor %}\n";
+
+        std::string err;
+        bool ok = tmpl.load_from_string(custom_template, &err);
+        ASSERT_TRUE(ok, ("Failed to load valid custom template: " + err).c_str());
+        ASSERT_TRUE(tmpl.is_loaded(), "is_loaded() must be true after loading valid custom template");
+        ASSERT_EQ(tmpl.default_reasoning_effort(), "low", "Default reasoning effort must be extracted as 'low'");
+        ASSERT_EQ(tmpl.get_reasoning_instructions("xhigh"), "CUSTOM_XHIGH_INSTRUCTION_ALPHA",
+                  "Custom xhigh instructions must match template");
+        ASSERT_EQ(tmpl.get_reasoning_instructions("low"), "CUSTOM_LOW_INSTRUCTION_BETA",
+                  "Custom low instructions must match template");
+
+        // Verify that render() uses the template-driven default reasoning effort ("low")
+        std::string rendered_default = tmpl.render("Test message");
+        ASSERT_TRUE(rendered_default.find("CUSTOM_LOW_INSTRUCTION_BETA") != std::string::npos,
+                    "render() must use template-driven 'low' reasoning instructions by default");
+        ASSERT_TRUE(rendered_default.find("Reasoning effort is set to") == std::string::npos,
+                    "render() must NOT use hardcoded fallback English text when template is loaded");
+
+        // Verify that render() with reasoning_effort='xhigh' uses the template-driven 'xhigh' instructions
+        ChatTemplateOptions opt_xhigh;
+        opt_xhigh.reasoning_effort = "xhigh";
+        std::string rendered_xhigh = tmpl.render("Test message", "", opt_xhigh);
+        ASSERT_TRUE(rendered_xhigh.find("CUSTOM_XHIGH_INSTRUCTION_ALPHA") != std::string::npos,
+                    "render() must use template-driven 'xhigh' reasoning instructions");
+    }
+
+    std::cout << "  -> Passed: Template parsing, structural fail-loudly validation, and dynamic rendering verified." << std::endl;
+    return 0;
+}
+
 int main() {
     std::cout << "==========================================================" << std::endl;
     std::cout << " xinfer Real Chat Template Verification & Test" << std::endl;
@@ -309,6 +421,7 @@ int main() {
     if (test_template_options() != 0) return 1;
     if (test_load_from_file_and_artifact() != 0) return 1;
     if (test_error_handling() != 0) return 1;
+    if (test_template_parsing_and_validation() != 0) return 1;
 
     std::cout << "==========================================================" << std::endl;
     std::cout << " ALL CHAT TEMPLATE TESTS PASSED SUCCESSFULLY!" << std::endl;

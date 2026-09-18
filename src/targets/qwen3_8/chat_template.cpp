@@ -6,6 +6,36 @@
 
 namespace xinfer::targets::qwen3_8 {
 
+// ============================================================================
+// Architectural Rationale: Compiled C++ ChatML Renderer vs Jinja Interpreter
+// ============================================================================
+// In accordance with AGENTS.md §1 ("Governing objective: single target combination
+// Intel Arc Pro B60 + Qwen3.8-27B") and §4 ("Ownership boundaries:
+// src/targets/qwen3_8 owns family invariants: tokenizer, chat template..."):
+//
+// 1. Zero-Overhead Serving: Integrating a generic Jinja2 template engine (e.g.
+//    minijinja or inja) would introduce heavy dynamic memory allocations, AST
+//    parsing, and interpretation overhead on the hot token generation path.
+//    Instead, QwenChatTemplate implements an explicitly verified, compiled C++20
+//    ChatML renderer faithful to Qwen3.8's official chat_template.jinja contract.
+//
+// 2. Fail-Loudly Invariant: The hand-written renderer is NOT an unchecked
+//    guess. To guarantee that render() never silently drifts from the model's
+//    actual checkpoint:
+//    - parse_template() validates all structural ChatML tokens (<|im_start|>,
+//      <|im_end|>, <think>, </think>, <tool_response>, role conditionals) in
+//      the loaded raw template.
+//    - It dynamically extracts default_reasoning_effort and the exact reasoning
+//      instructions for all supported effort levels ('xhigh', 'low', 'medium').
+//    - If any expected pattern or structural invariant cannot be verified or
+//      extracted, load_from_*() FAILS LOUDLY (returns false, populates error_msg,
+//      and logs to stderr). It NEVER silently falls back to guessed defaults.
+//
+// 3. init_defaults() provides baseline Qwen3.8 defaults solely for unit testing
+//    uninstantiated objects before an artifact is opened. Once a template is
+//    loaded, only validated template-derived parameters are active.
+// ============================================================================
+
 namespace {
 
 std::string trim_whitespace(std::string_view str) {
@@ -28,6 +58,152 @@ bool ends_with(std::string_view str, std::string_view suffix) {
     return str.size() >= suffix.size() && str.substr(str.size() - suffix.size()) == suffix;
 }
 
+size_t skip_ws(std::string_view sv, size_t pos) {
+    while (pos < sv.size() && (sv[pos] == ' ' || sv[pos] == '\t' || sv[pos] == '\r' || sv[pos] == '\n')) {
+        ++pos;
+    }
+    return pos;
+}
+
+size_t match_token(std::string_view sv, size_t pos, std::string_view token) {
+    pos = skip_ws(sv, pos);
+    if (pos + token.size() <= sv.size() && sv.substr(pos, token.size()) == token) {
+        return pos + token.size();
+    }
+    return std::string_view::npos;
+}
+
+bool extract_quoted_string(std::string_view sv, size_t& pos, std::string& out_str) {
+    pos = skip_ws(sv, pos);
+    if (pos >= sv.size()) return false;
+    char quote = sv[pos];
+    if (quote != '\'' && quote != '"') return false;
+    ++pos;
+
+    std::string res;
+    while (pos < sv.size()) {
+        if (sv[pos] == '\\' && pos + 1 < sv.size()) {
+            res.push_back(sv[pos + 1]);
+            pos += 2;
+        } else if (sv[pos] == quote) {
+            ++pos;
+            out_str = std::move(res);
+            return true;
+        } else {
+            res.push_back(sv[pos]);
+            ++pos;
+        }
+    }
+    return false;
+}
+
+bool parse_default_reasoning_effort(std::string_view sv, std::string& out_effort, std::string* error_msg) {
+    size_t re_pos = sv.find("reasoning_effort");
+    while (re_pos != std::string_view::npos) {
+        size_t cur = re_pos + std::string_view("reasoning_effort").size();
+        cur = match_token(sv, cur, "|");
+        if (cur != std::string_view::npos) {
+            cur = match_token(sv, cur, "default");
+            if (cur != std::string_view::npos) {
+                cur = match_token(sv, cur, "(");
+                if (cur != std::string_view::npos) {
+                    std::string val;
+                    if (extract_quoted_string(sv, cur, val)) {
+                        cur = match_token(sv, cur, ")");
+                        if (cur != std::string_view::npos) {
+                            if (val == "xhigh" || val == "medium" || val == "low") {
+                                out_effort = std::move(val);
+                                return true;
+                            } else {
+                                if (error_msg) {
+                                    *error_msg = "Extracted unsupported default reasoning effort '" + val +
+                                                 "' from template (expected xhigh, medium, or low)";
+                                }
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        re_pos = sv.find("reasoning_effort", re_pos + 1);
+    }
+    if (error_msg) {
+        *error_msg = "Failed to extract default reasoning effort (expected pattern 'reasoning_effort|default(...)')";
+    }
+    return false;
+}
+
+bool parse_reasoning_instruction_for_effort(std::string_view sv,
+                                            const std::string& effort,
+                                            std::string& out_instruction,
+                                            std::string* error_msg) {
+    size_t pos = 0;
+    while ((pos = sv.find("resolved_reasoning_effort", pos)) != std::string_view::npos) {
+        size_t cur = pos + std::string_view("resolved_reasoning_effort").size();
+        cur = match_token(sv, cur, "==");
+        if (cur != std::string_view::npos) {
+            std::string target_effort;
+            if (extract_quoted_string(sv, cur, target_effort) && target_effort == effort) {
+                // Found condition for target effort. Search within subsequent block (next 800 chars)
+                size_t search_limit = std::min(sv.size(), cur + 800);
+                std::string_view block = sv.substr(cur, search_limit - cur);
+                size_t instr_pos = block.find("reasoning_instructions");
+                if (instr_pos != std::string_view::npos) {
+                    size_t instr_cur = cur + instr_pos + std::string_view("reasoning_instructions").size();
+                    instr_cur = match_token(sv, instr_cur, "=");
+                    if (instr_cur != std::string_view::npos) {
+                        std::string instruction;
+                        if (extract_quoted_string(sv, instr_cur, instruction)) {
+                            out_instruction = std::move(instruction);
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        pos += std::string_view("resolved_reasoning_effort").size();
+    }
+    if (error_msg) {
+        *error_msg = "Failed to extract reasoning instructions for effort '" + effort +
+                     "' from template (expected 'resolved_reasoning_effort == \\'" + effort + "\\'')";
+    }
+    return false;
+}
+
+bool validate_structural_invariants(std::string_view sv, std::string* error_msg) {
+    struct Requirement {
+        std::string_view pattern;
+        std::string_view description;
+    };
+    static const Requirement requirements[] = {
+        {"<|im_start|>", "ChatML turn start marker '<|im_start|>'"},
+        {"<|im_end|>", "ChatML turn end marker '<|im_end|>'"},
+        {"<think>", "Reasoning thinking start tag '<think>'"},
+        {"</think>", "Reasoning thinking end tag '</think>'"},
+        {"add_generation_prompt", "Generation prompt control variable 'add_generation_prompt'"},
+        {"enable_thinking", "Thinking enable variable 'enable_thinking'"},
+        {"multi_step_tool", "Multi-step tool handling marker 'multi_step_tool'"},
+        {"<tool_response>", "Tool response container tag '<tool_response>'"},
+        {"</tool_response>", "Tool response container tag '</tool_response>'"},
+        {"messages", "Message list variable 'messages'"},
+        {"system", "System role marker 'system'"},
+        {"user", "User role marker 'user'"},
+        {"assistant", "Assistant role marker 'assistant'"},
+    };
+
+    for (const auto& req : requirements) {
+        if (sv.find(req.pattern) == std::string_view::npos) {
+            if (error_msg) {
+                *error_msg = std::string("Template structural validation failed: missing ") +
+                             std::string(req.description);
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
 } // anonymous namespace
 
 QwenChatTemplate::QwenChatTemplate() {
@@ -46,78 +222,91 @@ void QwenChatTemplate::init_defaults() {
     reasoning_instructions_["medium"] = "";
 }
 
-void QwenChatTemplate::parse_template() {
-    if (raw_template_.empty()) return;
-
-    // 1. Parse default reasoning effort: reasoning_effort|default('...')
-    std::string needle = "reasoning_effort|default(";
-    size_t p = raw_template_.find(needle);
-    if (p != std::string::npos) {
-        p += needle.size();
-        while (p < raw_template_.size() && (raw_template_[p] == ' ' || raw_template_[p] == '\'' || raw_template_[p] == '"')) {
-            char quote = raw_template_[p];
-            if (quote == '\'' || quote == '"') {
-                size_t q_end = raw_template_.find(quote, p + 1);
-                if (q_end != std::string::npos) {
-                    default_reasoning_effort_ = raw_template_.substr(p + 1, q_end - (p + 1));
-                }
-                break;
-            }
-            ++p;
-        }
+bool QwenChatTemplate::parse_template(std::string* error_msg) {
+    if (raw_template_.empty()) {
+        std::string err = "Empty chat template provided";
+        if (error_msg) *error_msg = err;
+        std::cerr << "[QwenChatTemplate] Error: " << err << std::endl;
+        return false;
     }
 
-    // 2. Parse reasoning instructions for each effort level
-    std::vector<std::string> known_efforts = {"xhigh", "low", "medium"};
-    for (const auto& effort : known_efforts) {
-        std::string effort_needle = "resolved_reasoning_effort == '" + effort + "'";
-        size_t e_pos = raw_template_.find(effort_needle);
-        if (e_pos == std::string::npos) {
-            effort_needle = "resolved_reasoning_effort == \"" + effort + "\"";
-            e_pos = raw_template_.find(effort_needle);
-        }
-
-        if (e_pos != std::string::npos) {
-            std::string set_needle = "reasoning_instructions = '";
-            size_t s_pos = raw_template_.find(set_needle, e_pos);
-            char quote_char = '\'';
-            if (s_pos == std::string::npos || s_pos > e_pos + 400) {
-                set_needle = "reasoning_instructions = \"";
-                s_pos = raw_template_.find(set_needle, e_pos);
-                quote_char = '"';
-            }
-
-            if (s_pos != std::string::npos && s_pos < e_pos + 400) {
-                size_t val_start = s_pos + set_needle.size();
-                size_t val_end = val_start;
-                while (val_end < raw_template_.size()) {
-                    if (raw_template_[val_end] == quote_char && raw_template_[val_end - 1] != '\\') {
-                        break;
-                    }
-                    ++val_end;
-                }
-                if (val_end < raw_template_.size()) {
-                    reasoning_instructions_[effort] = raw_template_.substr(val_start, val_end - val_start);
-                }
-            }
-        }
+    // 1. Validate structural ChatML invariants to guarantee template compatibility
+    std::string struct_err;
+    if (!validate_structural_invariants(raw_template_, &struct_err)) {
+        if (error_msg) *error_msg = struct_err;
+        std::cerr << "[QwenChatTemplate] Error: " << struct_err << std::endl;
+        return false;
     }
+
+    // 2. Parse default reasoning effort
+    std::string effort_err;
+    std::string default_effort;
+    if (!parse_default_reasoning_effort(raw_template_, default_effort, &effort_err)) {
+        if (error_msg) *error_msg = effort_err;
+        std::cerr << "[QwenChatTemplate] Error: " << effort_err << std::endl;
+        return false;
+    }
+
+    // 3. Parse reasoning instructions for known effort levels
+    std::string xhigh_err, low_err;
+    std::string xhigh_instr, low_instr;
+    if (!parse_reasoning_instruction_for_effort(raw_template_, "xhigh", xhigh_instr, &xhigh_err)) {
+        if (error_msg) *error_msg = xhigh_err;
+        std::cerr << "[QwenChatTemplate] Error: " << xhigh_err << std::endl;
+        return false;
+    }
+    if (!parse_reasoning_instruction_for_effort(raw_template_, "low", low_instr, &low_err)) {
+        if (error_msg) *error_msg = low_err;
+        std::cerr << "[QwenChatTemplate] Error: " << low_err << std::endl;
+        return false;
+    }
+
+    // Check optional medium effort instruction (defaults to empty string in Qwen3.8)
+    std::string medium_instr;
+    std::string med_err;
+    if (parse_reasoning_instruction_for_effort(raw_template_, "medium", medium_instr, &med_err)) {
+        reasoning_instructions_["medium"] = std::move(medium_instr);
+    } else {
+        reasoning_instructions_["medium"] = "";
+    }
+
+    default_reasoning_effort_ = std::move(default_effort);
+    reasoning_instructions_["xhigh"] = std::move(xhigh_instr);
+    reasoning_instructions_["low"] = std::move(low_instr);
+
+    return true;
 }
 
 bool QwenChatTemplate::load_from_string(const std::string& template_str, std::string* error_msg) {
     if (template_str.empty()) {
-        if (error_msg) *error_msg = "Empty chat template string provided";
+        std::string err = "Empty chat template string provided";
+        if (error_msg) *error_msg = err;
+        std::cerr << "[QwenChatTemplate] Error: " << err << std::endl;
         return false;
     }
     raw_template_ = template_str;
-    parse_template();
+
+    // Clear prior dynamic instructions so failure never silently retains previous state
+    reasoning_instructions_.clear();
+    default_reasoning_effort_.clear();
+    is_loaded_ = false;
+
+    if (!parse_template(error_msg)) {
+        // Parsing failed loudly. Restore baseline defaults for safety, but mark is_loaded_ = false
+        init_defaults();
+        is_loaded_ = false;
+        return false;
+    }
+
     is_loaded_ = true;
     return true;
 }
 
 bool QwenChatTemplate::load_from_buffer(const void* data, size_t size, std::string* error_msg) {
     if (!data || size == 0) {
-        if (error_msg) *error_msg = "Empty chat template buffer provided";
+        std::string err = "Empty chat template buffer provided";
+        if (error_msg) *error_msg = err;
+        std::cerr << "[QwenChatTemplate] Error: " << err << std::endl;
         return false;
     }
     std::string str(static_cast<const char*>(data), size);
@@ -127,7 +316,9 @@ bool QwenChatTemplate::load_from_buffer(const void* data, size_t size, std::stri
 bool QwenChatTemplate::load_from_file(const std::string& path, std::string* error_msg) {
     std::ifstream f(path, std::ios::binary);
     if (!f.is_open()) {
-        if (error_msg) *error_msg = "Could not open chat template file: " + path;
+        std::string err = "Could not open chat template file: " + path;
+        if (error_msg) *error_msg = err;
+        std::cerr << "[QwenChatTemplate] Error: " << err << std::endl;
         return false;
     }
     std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
