@@ -5,6 +5,7 @@
 #include "targets/qwen3_8/tokenizer.h"
 #include "targets/qwen3_8/forward.h"
 #include "targets/qwen3_8/decode_graph.h"
+#include "ops/sampling.h"
 #include "core/kv_cache.h"
 #include <chrono>
 #include <iostream>
@@ -165,8 +166,15 @@ public:
             std::cout << "[xinfer::Engine] Graph capture fallback to standard kernel submission" << std::endl;
         }
 
-            is_loaded_ = true;
-            return true;
+        // 8. Initialize isolated draft execution context (Speculative Decoding / MTP)
+        if (config.enable_speculative) {
+            draft_ctx_.init(ctx_, *model_, *kv_cache_, config.arena_capacity_bytes, config.draft_tokens_num);
+            std::cout << "[xinfer::Engine] Initialized Draft Execution Context (MTP active, N="
+                      << config.draft_tokens_num << ")" << std::endl;
+        }
+
+        is_loaded_ = true;
+        return true;
         } catch (const sycl::exception& e) {
             std::string msg = "SYCL exception during model load: " + std::string(e.what());
             std::cerr << "[xinfer::Engine] " << msg << std::endl;
@@ -389,9 +397,14 @@ public:
                 return result;
             }
 
-            // 2. Autoregressive single-token decode loop using persistent KV cache and captured command graph
+            bool use_speculative = (config_.enable_speculative || gen_config.draft_tokens_num > 0) &&
+                                   (draft_ctx_.is_initialized || draft_ctx_.arena);
+            size_t draft_n = (gen_config.draft_tokens_num > 0) ? static_cast<size_t>(gen_config.draft_tokens_num) : config_.draft_tokens_num;
+            if (draft_n == 0) draft_n = 4;
+
+            // 2. Autoregressive decode loop (supports Speculative Decoding / MTP and single-token decode)
             result.finish_reason = "length"; // Default if max_new_tokens limit is reached
-            for (int step = 1; step < gen_config.max_new_tokens; ++step) {
+            while (result.token_ids.size() < static_cast<size_t>(gen_config.max_new_tokens)) {
                 // Guard against writing past the KV cache buffer capacity
                 if (kv_cache_->current_seq_len() >= kv_cache_->max_seq_len()) {
                     std::cout << "[xinfer::Engine] Context length limit reached ("
@@ -400,6 +413,118 @@ public:
                     break;
                 }
 
+                size_t remaining_tokens = static_cast<size_t>(gen_config.max_new_tokens) - result.token_ids.size();
+
+                if (use_speculative && remaining_tokens > 1 &&
+                    kv_cache_->current_seq_len() + draft_n <= kv_cache_->max_seq_len()) {
+                    size_t cur_draft_n = std::min(draft_n, remaining_tokens - 1);
+                    int64_t prefix_len = static_cast<int64_t>(kv_cache_->current_seq_len());
+
+                    // Checkpoint linear recurrent state in case of rollback
+                    kv_cache_->checkpoint_recurrent_state();
+
+                    // 1. Generate cur_draft_n draft candidate tokens
+                    auto draft_res = targets::qwen3_8::draft_decode_loop(
+                        ctx_, *draft_ctx_.arena, *model_, *kv_cache_,
+                        draft_ctx_.decode_graph.get(), current_tok, cur_draft_n);
+
+                    if (draft_res.success && !draft_res.tokens.empty()) {
+                        size_t actual_draft_tokens = draft_res.tokens.size();
+
+                        // 2. Batched verification pass (M = actual_draft_tokens)
+                        const auto& cfg = model_->config();
+                        float* d_verify_logits = static_cast<float*>(
+                            arena_->persistent_buffer(actual_draft_tokens * cfg.vocab_size * sizeof(float)));
+
+                        targets::qwen3_8::forward_verify(
+                            ctx_, *arena_, *model_, *kv_cache_,
+                            draft_res.tokens.data(), actual_draft_tokens, prefix_len, d_verify_logits);
+
+                        // 3. Speculative acceptance / rejection logic
+                        auto accept_res = ops::speculative_accept_reject(
+                            ctx_->queue(), draft_res.tokens.data(), actual_draft_tokens,
+                            d_verify_logits, cfg.vocab_size);
+
+                        bool stopped = false;
+                        if (accept_res.has_rejected_token) {
+                            // Rollback KV cache: decrement seq_len back to prefix_len + num_accepted
+                            size_t rollback_steps = actual_draft_tokens - accept_res.num_accepted;
+                            kv_cache_->rollback(rollback_steps);
+
+                            // Emit accepted tokens
+                            for (int64_t tok : accept_res.accepted_tokens) {
+                                if (tok == eos_tok || (im_end_tok >= 0 && tok == im_end_tok)) {
+                                    result.finish_reason = "stop";
+                                    stopped = true;
+                                    break;
+                                }
+                                if (!process_token(tok)) {
+                                    result.finish_reason = "stop";
+                                    stopped = true;
+                                    break;
+                                }
+                            }
+                            if (stopped) break;
+
+                            // Emit resampled token
+                            int64_t resample_tok = accept_res.bonus_or_resampled_token;
+                            if (resample_tok >= 0) {
+                                if (resample_tok == eos_tok || (im_end_tok >= 0 && resample_tok == im_end_tok)) {
+                                    result.finish_reason = "stop";
+                                    break;
+                                }
+                                if (!process_token(resample_tok)) {
+                                    result.finish_reason = "stop";
+                                    break;
+                                }
+                                if (!kv_cache_->advance(1)) {
+                                    result.finish_reason = "length";
+                                    break;
+                                }
+                                current_tok = resample_tok;
+                            }
+                        } else {
+                            // All tokens accepted
+                            for (int64_t tok : accept_res.accepted_tokens) {
+                                if (tok == eos_tok || (im_end_tok >= 0 && tok == im_end_tok)) {
+                                    result.finish_reason = "stop";
+                                    stopped = true;
+                                    break;
+                                }
+                                if (!process_token(tok)) {
+                                    result.finish_reason = "stop";
+                                    stopped = true;
+                                    break;
+                                }
+                            }
+                            if (stopped) break;
+
+                            // Bonus token from verified target logits at last draft token
+                            int64_t bonus_tok = accept_res.bonus_or_resampled_token;
+                            if (bonus_tok >= 0 && result.token_ids.size() < static_cast<size_t>(gen_config.max_new_tokens)) {
+                                if (bonus_tok == eos_tok || (im_end_tok >= 0 && bonus_tok == im_end_tok)) {
+                                    result.finish_reason = "stop";
+                                    break;
+                                }
+                                if (!process_token(bonus_tok)) {
+                                    result.finish_reason = "stop";
+                                    break;
+                                }
+                                if (!kv_cache_->advance(1)) {
+                                    result.finish_reason = "length";
+                                    break;
+                                }
+                                current_tok = bonus_tok;
+                            } else if (!accept_res.accepted_tokens.empty()) {
+                                current_tok = accept_res.accepted_tokens.back();
+                            }
+                        }
+
+                        continue;
+                    }
+                }
+
+                // Standard single-token decode step (fallback or non-speculative mode)
                 int64_t next_tok = 0;
                 if (decode_graph_ && decode_graph_->is_captured()) {
                     next_tok = decode_graph_->decode_step(current_tok, kv_cache_->current_seq_len());
@@ -535,14 +660,50 @@ public:
         if (arena_) {
             arena_->reset();
         }
+        if (draft_ctx_.is_initialized) {
+            draft_ctx_.reset();
+        }
     }
 
 private:
+    struct DraftContext {
+        std::shared_ptr<core::DeviceContext> ctx;
+        std::unique_ptr<core::DeviceArena> arena;
+        std::unique_ptr<targets::qwen3_8::DecodeGraph> decode_graph;
+        bool is_initialized{false};
+        size_t draft_tokens_num{4};
+
+        bool init(std::shared_ptr<core::DeviceContext> dev_ctx,
+                  const targets::qwen3_8_27b::LoadedModel& model,
+                  core::KVCache& main_kv_cache,
+                  size_t arena_capacity,
+                  size_t draft_n) {
+            ctx = dev_ctx;
+            draft_tokens_num = draft_n;
+            arena = std::make_unique<core::DeviceArena>(ctx, arena_capacity);
+
+            // Draft graph isolation: isolated DecodeGraph instance
+            decode_graph = std::make_unique<targets::qwen3_8::DecodeGraph>(ctx, model, main_kv_cache);
+            if (decode_graph->capture()) {
+                std::cout << "[xinfer::Engine] Captured draft command graph (isolated)" << std::endl;
+            } else {
+                std::cout << "[xinfer::Engine] Draft graph capture fallback to standard kernel submission" << std::endl;
+            }
+            is_initialized = true;
+            return true;
+        }
+
+        void reset() {
+            if (arena) arena->reset();
+        }
+    };
+
     std::shared_ptr<core::DeviceContext> ctx_;
     std::unique_ptr<targets::qwen3_8_27b::LoadedModel> model_;
     std::unique_ptr<core::DeviceArena> arena_;
     std::unique_ptr<core::KVCache> kv_cache_;
     std::unique_ptr<targets::qwen3_8::DecodeGraph> decode_graph_;
+    DraftContext draft_ctx_;
     targets::qwen3_8::QwenTokenizer tokenizer_;
     EngineConfig config_;
     bool is_loaded_{false};

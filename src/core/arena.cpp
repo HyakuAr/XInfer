@@ -39,12 +39,14 @@ DeviceArena::DeviceArena(DeviceArena&& other) noexcept
       peak_offset_(other.peak_offset_),
       default_alignment_(other.default_alignment_),
       persistent_allocations_(std::move(other.persistent_allocations_)),
-      persistent_buffer_(other.persistent_buffer_) {
+      persistent_buffer_(other.persistent_buffer_),
+      persistent_buffer_capacity_(other.persistent_buffer_capacity_) {
     other.base_ptr_ = nullptr;
     other.capacity_ = 0;
     other.offset_ = 0;
     other.peak_offset_ = 0;
     other.persistent_buffer_ = nullptr;
+    other.persistent_buffer_capacity_ = 0;
 }
 
 DeviceArena& DeviceArena::operator=(DeviceArena&& other) noexcept {
@@ -67,12 +69,14 @@ DeviceArena& DeviceArena::operator=(DeviceArena&& other) noexcept {
         default_alignment_ = other.default_alignment_;
         persistent_allocations_ = std::move(other.persistent_allocations_);
         persistent_buffer_ = other.persistent_buffer_;
+        persistent_buffer_capacity_ = other.persistent_buffer_capacity_;
 
         other.base_ptr_ = nullptr;
         other.capacity_ = 0;
         other.offset_ = 0;
         other.peak_offset_ = 0;
         other.persistent_buffer_ = nullptr;
+        other.persistent_buffer_capacity_ = 0;
     }
     return *this;
 }
@@ -121,6 +125,11 @@ void* DeviceArena::persistent_buffer(size_t bytes, size_t alignment) {
             throw std::invalid_argument("DeviceArena::persistent_buffer: initial allocation must specify non-zero bytes");
         }
         persistent_buffer_ = allocate_persistent(bytes, alignment);
+        persistent_buffer_capacity_ = bytes;
+    } else if (bytes > 0 && bytes > persistent_buffer_capacity_) {
+        throw std::invalid_argument("DeviceArena::persistent_buffer: requested bytes (" +
+                                    std::to_string(bytes) + ") exceeds allocated persistent capacity (" +
+                                    std::to_string(persistent_buffer_capacity_) + ")");
     }
     return persistent_buffer_;
 }

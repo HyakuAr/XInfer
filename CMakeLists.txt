@@ -279,6 +279,19 @@ target_link_options(test_kv_cache PRIVATE -fsycl)
 
 add_test(NAME KVCacheTest COMMAND test_kv_cache)
 
+# Speculative Decoding / Multi-Token Prediction (MTP)
+add_executable(test_speculative_mtp
+    tests/test_speculative_mtp.cpp
+)
+target_link_libraries(test_speculative_mtp PRIVATE
+    xinfer_core
+    xinfer_ops
+)
+target_compile_options(test_speculative_mtp PRIVATE -fsycl)
+target_link_options(test_speculative_mtp PRIVATE -fsycl)
+
+add_test(NAME SpeculativeMTPTest COMMAND test_speculative_mtp)
+
 # Milestone 7: Accelerated Linear (GEMV) & Matrix Strategy (Parity Diagnostics)
 add_executable(query_matrix_caps
     tools/parity/query_matrix_caps.cpp

@@ -40,6 +40,7 @@ public:
     // Initial call must specify non-zero bytes to allocate; subsequent calls may pass bytes = 0.
     void* persistent_buffer(size_t bytes = 0, size_t alignment = 0);
     const void* persistent_buffer() const noexcept { return persistent_buffer_; }
+    size_t persistent_buffer_capacity() const noexcept { return persistent_buffer_capacity_; }
 
     // Reset the bump pointer to 0 for reuse in the next decode step without deallocating USM
     void reset() noexcept;
@@ -61,6 +62,7 @@ private:
     size_t default_alignment_{DEFAULT_ALIGNMENT};
     std::vector<void*> persistent_allocations_;
     void* persistent_buffer_{nullptr};
+    size_t persistent_buffer_capacity_{0};
 };
 
 } // namespace xinfer::core

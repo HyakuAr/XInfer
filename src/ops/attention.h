@@ -300,4 +300,67 @@ sycl::event sdpa_causal_cached_int8_dynamic(sycl::queue& q,
                                             float scale = 0.0f,
                                             int64_t max_seq_len = 0);
 
+// Batched speculative verification attention kernel (M = N):
+// Allows draft token i in [0, num_draft_tokens) to attend to prefix KV cache (positions 0 .. prefix_len - 1)
+// and preceding draft tokens in the window (positions prefix_len .. prefix_len + i).
+void sdpa_causal_verify(sycl::queue& q,
+                        float* out,
+                        const float* Q,
+                        const sycl::half* k_cache,
+                        const sycl::half* v_cache,
+                        int64_t prefix_len,
+                        int64_t num_draft_tokens,
+                        int64_t num_q_heads,
+                        int64_t num_kv_heads,
+                        int64_t head_dim,
+                        float scale = 0.0f,
+                        int64_t max_seq_len = 0);
+
+void sdpa_causal_verify(sycl::queue& q,
+                        sycl::half* out,
+                        const sycl::half* Q,
+                        const sycl::half* k_cache,
+                        const sycl::half* v_cache,
+                        int64_t prefix_len,
+                        int64_t num_draft_tokens,
+                        int64_t num_q_heads,
+                        int64_t num_kv_heads,
+                        int64_t head_dim,
+                        float scale = 0.0f,
+                        int64_t max_seq_len = 0);
+
+void sdpa_causal_verify_int8(sycl::queue& q,
+                             float* out,
+                             const float* Q,
+                             const int8_t* k_cache,
+                             const int8_t* v_cache,
+                             const float* k_scale,
+                             const float* v_scale,
+                             const float* k_zero_point,
+                             const float* v_zero_point,
+                             int64_t prefix_len,
+                             int64_t num_draft_tokens,
+                             int64_t num_q_heads,
+                             int64_t num_kv_heads,
+                             int64_t head_dim,
+                             float scale = 0.0f,
+                             int64_t max_seq_len = 0);
+
+void sdpa_causal_verify_int8(sycl::queue& q,
+                             sycl::half* out,
+                             const sycl::half* Q,
+                             const int8_t* k_cache,
+                             const int8_t* v_cache,
+                             const float* k_scale,
+                             const float* v_scale,
+                             const float* k_zero_point,
+                             const float* v_zero_point,
+                             int64_t prefix_len,
+                             int64_t num_draft_tokens,
+                             int64_t num_q_heads,
+                             int64_t num_kv_heads,
+                             int64_t head_dim,
+                             float scale = 0.0f,
+                             int64_t max_seq_len = 0);
+
 } // namespace xinfer::ops
