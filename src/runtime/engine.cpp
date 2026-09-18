@@ -147,14 +147,15 @@ public:
         arena_ = std::make_unique<core::DeviceArena>(ctx_, config.arena_capacity_bytes);
 
         // 6. Initialize persistent KV cache and recurrent states
-        core::KVCacheConfig kv_cfg = model_->config().create_kv_cache_config(config.max_seq_len);
+        core::KVCacheConfig kv_cfg = model_->config().create_kv_cache_config(config.max_seq_len, config.use_int8_kv);
         kv_cache_ = std::make_unique<core::KVCache>(ctx_, kv_cfg);
         if (!kv_cache_->allocate()) {
             if (error_msg) *error_msg = "Failed to allocate KV cache on Intel GPU";
             return false;
         }
         std::cout << "[xinfer::Engine] Initialized KV cache (max_seq_len=" << config.max_seq_len
-                  << ", " << (kv_cache_->total_allocated_bytes() / (1024 * 1024)) << " MB VRAM)" << std::endl;
+                  << ", " << (kv_cache_->total_allocated_bytes() / (1024 * 1024)) << " MB VRAM"
+                  << (config.use_int8_kv ? ", INT8 KV" : ", FP16 KV") << ")" << std::endl;
 
         // 7. Initialize and capture Level Zero / SYCL decode graph for fixed-shape decode step (Milestone 8)
         decode_graph_ = std::make_unique<targets::qwen3_8::DecodeGraph>(ctx_, *model_, *kv_cache_);
@@ -472,6 +473,13 @@ public:
                 result.decode_tokens_per_sec = static_cast<double>(result.generated_tokens - 1) / decode_time;
             }
 
+            return result;
+        } catch (const targets::qwen3_8::context_length_exceeded& e) {
+            std::cerr << "[xinfer::Engine] Context length exceeded during generation: " << e.what() << std::endl;
+            reset();
+            result.success = false;
+            result.error_code = "context_length_exceeded";
+            result.error_msg = e.what();
             return result;
         } catch (const sycl::exception& e) {
             std::cerr << "[xinfer::Engine] SYCL exception during generation: " << e.what() << std::endl;

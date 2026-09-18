@@ -8,6 +8,7 @@
 #include "targets/qwen3_8/forward.h"
 #include "targets/qwen3_8_27b/weights.h"
 #include "artifact/writer.h"
+#include "xinfer/engine.h"
 
 #include <sycl/sycl.hpp>
 #include <sycl/ext/oneapi/experimental/graph.hpp>
@@ -288,6 +289,58 @@ void test_causal_conv1d_chunk_boundaries(sycl::queue& q) {
     sycl::free(out_qkv, q);
 }
 
+void test_chunked_prefill_and_kv_contract(std::shared_ptr<core::DeviceContext> ctx) {
+    std::cout << "\nTesting chunked prefill bounds checking and INT8 KV configuration..." << std::endl;
+
+    // 1. Verify EngineConfig default and INT8 KV configuration
+    EngineConfig eng_cfg;
+    assert(!eng_cfg.use_int8_kv);
+    eng_cfg.use_int8_kv = true;
+    assert(eng_cfg.use_int8_kv);
+    std::cout << "  -> PASSED: EngineConfig::use_int8_kv toggles correctly" << std::endl;
+
+    // 2. Verify ModelConfig::create_kv_cache_config respects use_int8_kv
+    targets::qwen3_8_27b::ModelConfig model_cfg;
+    model_cfg.num_hidden_layers = 4;
+    auto default_kv_cfg = model_cfg.create_kv_cache_config(512, false);
+    assert(default_kv_cfg.dtype == core::KVCacheDType::FP16);
+
+    auto int8_kv_cfg = model_cfg.create_kv_cache_config(512, true);
+    assert(int8_kv_cfg.dtype == core::KVCacheDType::INT8);
+    std::cout << "  -> PASSED: create_kv_cache_config produces INT8 KV dtype when use_int8_kv=true" << std::endl;
+
+    // 3. Verify context_length_exceeded exception when prompt tokens exceed max_seq_len
+    core::KVCacheConfig kv_cfg;
+    kv_cfg.max_seq_len = 16;
+    kv_cfg.num_full_layers = 1;
+    kv_cfg.num_linear_layers = 1;
+    kv_cfg.num_kv_heads = 4;
+    kv_cfg.head_dim = 128;
+    kv_cfg.linear_num_v_heads = 4;
+    kv_cfg.linear_head_k_dim = 64;
+    kv_cfg.linear_head_v_dim = 64;
+    kv_cfg.linear_conv_channels = 512;
+    kv_cfg.linear_conv_kernel_dim = 4;
+
+    core::KVCache kv_cache(ctx, kv_cfg);
+    assert(kv_cache.allocate());
+
+    core::DeviceArena arena(ctx, 4 * 1024 * 1024);
+
+    alignas(targets::qwen3_8_27b::LoadedModel) char dummy_mem[sizeof(targets::qwen3_8_27b::LoadedModel)] = {0};
+    auto* dummy_model = reinterpret_cast<targets::qwen3_8_27b::LoadedModel*>(dummy_mem);
+
+    std::vector<int64_t> oversized_prompt(32, 10); // 32 tokens > max_seq_len (16)
+    bool caught_exceeded = false;
+    try {
+        targets::qwen3_8::prefill_prompt(ctx, arena, *dummy_model, kv_cache, oversized_prompt, 8);
+    } catch (const targets::qwen3_8::context_length_exceeded& e) {
+        caught_exceeded = true;
+        std::cout << "  -> PASSED: prefill_prompt threw context_length_exceeded as expected: " << e.what() << std::endl;
+    }
+    assert(caught_exceeded);
+}
+
 int main() {
     std::cout << "==========================================================" << std::endl;
     std::cout << " xinfer M8 Level Zero / SYCL Decode Graph Unit Test" << std::endl;
@@ -378,6 +431,9 @@ int main() {
 
     // 6. Run embedding lookup bounds checking test
     test_embed_tokens_lookup_bounds(q);
+
+    // 7. Run chunked prefill bounds checking and INT8 KV configuration test
+    test_chunked_prefill_and_kv_contract(ctx);
 
     std::cout << "\n==========================================================" << std::endl;
     std::cout << " ALL M8 DECODE GRAPH & LINEAR ATTN TESTS PASSED ON B60!" << std::endl;
