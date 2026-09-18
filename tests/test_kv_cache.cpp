@@ -144,6 +144,68 @@ int main() {
     }
     std::cout << "[PASS] KVCache bounds checking and advance() clamping verified\n";
 
-    std::cout << "All KVCache tests PASSED!\n";
+    // ==========================================
+    // INT8 KV Cache Tests
+    // ==========================================
+    std::cout << "\n--- Testing INT8 KV Cache Storage & Fail-Loud Scaling ---\n";
+    xinfer::core::KVCacheConfig int8_cfg = config;
+    int8_cfg.dtype = xinfer::core::KVCacheDType::INT8;
+    int8_cfg.artifact_quant_scheme = "INT4-G128-SYM"; // Missing "INT8-KV"
+
+    xinfer::core::KVCache invalid_int8_cache(ctx, int8_cfg);
+    try {
+        invalid_int8_cache.allocate();
+        std::cerr << "FAILED: allocate() did not throw when artifact missing INT8-KV declaration\n";
+        return 1;
+    } catch (const std::runtime_error& e) {
+        std::cout << "[PASS] Correctly caught fail-loud exception for undeclared INT8-KV: " << e.what() << "\n";
+    }
+
+    // Now declare INT8-KV properly
+    int8_cfg.artifact_quant_scheme = "INT4-G128-SYM,INT8-KV";
+    xinfer::core::KVCache int8_cache(ctx, int8_cfg);
+    if (!int8_cache.allocate()) {
+        std::cerr << "FAILED: Valid INT8 KVCache allocation failed\n";
+        return 1;
+    }
+    std::cout << "[PASS] Allocated INT8 KVCache on GPU: "
+              << (int8_cache.total_allocated_bytes() / (1024 * 1024)) << " MB (vs FP16 "
+              << (cache.total_allocated_bytes() / (1024 * 1024)) << " MB)\n";
+
+    if (int8_cache.total_allocated_bytes() >= cache.total_allocated_bytes()) {
+        std::cerr << "FAILED: INT8 cache is not smaller than FP16 cache\n";
+        return 1;
+    }
+
+    // Verify INT8 pointers across all full layers
+    for (size_t l = 0; l < 16; ++l) {
+        if (!int8_cache.k_cache_int8(l) || !int8_cache.v_cache_int8(l) ||
+            !int8_cache.k_scale(l) || !int8_cache.v_scale(l) ||
+            !int8_cache.k_zero_point(l) || !int8_cache.v_zero_point(l)) {
+            std::cerr << "FAILED: Null INT8 KV or scale pointer at layer " << l << "\n";
+            return 1;
+        }
+    }
+    std::cout << "[PASS] Verified all INT8 KV, scale, and zero-point pointers across 16 full-attention layers\n";
+
+    // Verify type safety: FP16 accessors on INT8 throw std::logic_error
+    try {
+        int8_cache.k_cache(0);
+        std::cerr << "FAILED: k_cache(0) on INT8 cache did not throw std::logic_error\n";
+        return 1;
+    } catch (const std::logic_error&) {
+        std::cout << "[PASS] k_cache(0) on INT8 cache threw std::logic_error as expected\n";
+    }
+
+    // Verify type safety: INT8 accessors on FP16 throw std::logic_error
+    try {
+        cache.k_cache_int8(0);
+        std::cerr << "FAILED: k_cache_int8(0) on FP16 cache did not throw std::logic_error\n";
+        return 1;
+    } catch (const std::logic_error&) {
+        std::cout << "[PASS] k_cache_int8(0) on FP16 cache threw std::logic_error as expected\n";
+    }
+
+    std::cout << "\nAll KVCache tests PASSED!\n";
     return 0;
 }
