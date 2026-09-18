@@ -135,6 +135,7 @@ add_library(xinfer_ops STATIC
     src/ops/attention.cpp
     src/ops/sampling.cpp
     src/ops/vit.cpp
+    src/ops/eval.cpp
 )
 target_include_directories(xinfer_ops PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
