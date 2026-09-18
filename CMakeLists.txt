@@ -45,6 +45,12 @@ add_compile_definitions(
     XINFER_BUILD_CONFIG="${XINFER_BUILD_CONFIG_STR}"
 )
 
+# Checkpoint directory for tests (can be overridden via CMake or XINFER_CHECKPOINT_DIR env var)
+set(XINFER_CHECKPOINT_DIR "H:/Models/Qwen3.8-27B" CACHE PATH "Path to Qwen3.8-27B HF checkpoint for tests")
+add_compile_definitions(
+    XINFER_DEFAULT_CHECKPOINT_DIR="${XINFER_CHECKPOINT_DIR}"
+)
+
 message(STATUS "xInfer Build Configuration:")
 message(STATUS "  Build Type:       ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Compiler:         ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
@@ -214,6 +220,7 @@ add_executable(test_tokenizer_bpe
 target_include_directories(test_tokenizer_bpe PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests
 )
 target_link_libraries(test_tokenizer_bpe PRIVATE
     xinfer_targets
@@ -230,6 +237,7 @@ add_executable(test_chat_template
 target_include_directories(test_chat_template PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests
 )
 target_link_libraries(test_chat_template PRIVATE
     xinfer_targets

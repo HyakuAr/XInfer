@@ -1,5 +1,6 @@
 #include "targets/qwen3_8/chat_template.h"
 #include "artifact/reader.h"
+#include "test_checkpoint.h"
 #include <iostream>
 #include <vector>
 #include <cassert>
@@ -171,11 +172,12 @@ int test_load_from_file_and_artifact() {
     std::cout << "[Test 4/5] Testing loading real chat_template.jinja from checkpoint and artifact..." << std::endl;
 
     // 1. From checkpoint file
-    std::string jinja_path = R"(H:\Models\Qwen3.8-27B\chat_template.jinja)";
+    std::filesystem::path checkpoint_dir = xinfer::test::get_checkpoint_dir();
+    std::filesystem::path jinja_path = checkpoint_dir / "chat_template.jinja";
     if (std::filesystem::exists(jinja_path)) {
         QwenChatTemplate tmpl;
         std::string err;
-        bool ok = tmpl.load_from_file(jinja_path, &err);
+        bool ok = tmpl.load_from_file(jinja_path.string(), &err);
         ASSERT_TRUE(ok, ("Failed to load chat_template.jinja from file: " + err).c_str());
         ASSERT_TRUE(tmpl.is_loaded(), "is_loaded() must be true");
         ASSERT_EQ(tmpl.default_reasoning_effort(), "xhigh", "Default reasoning effort must be xhigh");
@@ -191,7 +193,8 @@ int test_load_from_file_and_artifact() {
         ASSERT_EQ(actual, expected, "Render from loaded jinja file mismatch");
         std::cout << "  -> Passed: Loaded and verified real chat_template.jinja from checkpoint." << std::endl;
     } else {
-        std::cout << "  -> Note: Checkpoint chat_template.jinja not accessible, skipping file load test." << std::endl;
+        std::cout << "  -> Note: Checkpoint chat_template.jinja not accessible ("
+                  << jinja_path.string() << "), skipping file load test." << std::endl;
     }
 
     // 2. From .xinfer container artifact
