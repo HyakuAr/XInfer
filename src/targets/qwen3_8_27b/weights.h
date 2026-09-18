@@ -148,7 +148,10 @@ struct ModelConfig {
         return (l % interval == interval - 1);
     }
 
-    core::KVCacheConfig create_kv_cache_config(size_t max_seq_len = 8192) const noexcept {
+    std::string quant_scheme;
+    bool is_int8_kv{false};
+
+    core::KVCacheConfig create_kv_cache_config(size_t max_seq_len = 8192, bool use_int8_kv = false) const noexcept {
         core::KVCacheConfig cfg;
         cfg.max_seq_len = max_seq_len;
         cfg.num_full_layers = static_cast<size_t>(num_full_layers());
@@ -160,6 +163,8 @@ struct ModelConfig {
         cfg.linear_head_v_dim = static_cast<size_t>(linear_head_v_dim);
         cfg.linear_conv_channels = static_cast<size_t>(linear_conv_channels);
         cfg.linear_conv_kernel_dim = static_cast<size_t>(linear_conv_kernel_dim);
+        cfg.dtype = (use_int8_kv || is_int8_kv) ? core::KVCacheDType::INT8 : core::KVCacheDType::FP16;
+        cfg.artifact_quant_scheme = quant_scheme;
         return cfg;
     }
 };

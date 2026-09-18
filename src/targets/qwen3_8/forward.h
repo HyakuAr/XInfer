@@ -6,8 +6,16 @@
 #include "targets/qwen3_8_27b/weights.h"
 #include <vector>
 #include <cstdint>
+#include <stdexcept>
+#include <string>
 
 namespace xinfer::targets::qwen3_8 {
+
+class context_length_exceeded : public std::runtime_error {
+public:
+    explicit context_length_exceeded(const std::string& msg = "context_length_exceeded")
+        : std::runtime_error(msg) {}
+};
 
 // Looks up BF16 token embeddings and writes FP16/FP32 activations
 // vocab_size: bounds check limit (0 = unbounded, defaults to ModelConfig::kDefaultVocabSize)
@@ -83,7 +91,11 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
                    int64_t seq_len,
                    int64_t start_pos,
                    bool zero_linear_state,
-                   float* out_last_token_logits = nullptr);
+                   float* out_last_token_logits = nullptr,
+                   bool is_graph_capture = false,
+                   const LayerActivationBuffers* preallocated_bufs = nullptr,
+                   int64_t* preallocated_token_ids = nullptr,
+                   int64_t* preallocated_positions = nullptr);
 
 // Prefills the prompt in chunks (chunk_size tokens each) and returns the first generated token ID
 int64_t prefill_prompt(std::shared_ptr<core::DeviceContext> ctx,
@@ -91,7 +103,8 @@ int64_t prefill_prompt(std::shared_ptr<core::DeviceContext> ctx,
                        const qwen3_8_27b::LoadedModel& model,
                        core::KVCache& kv_cache,
                        const std::vector<int64_t>& prompt_tokens,
-                       size_t chunk_size = 512);
+                       size_t chunk_size = 512,
+                       bool is_graph_capture = false);
 
 // Decodes a single token at the current KV-cache sequence length and returns the next token ID
 int64_t decode_step(std::shared_ptr<core::DeviceContext> ctx,

@@ -76,6 +76,11 @@ std::unique_ptr<LoadedModel> LoadedModel::load_from_artifact(
 
     // Validate and cross-check ModelConfig against artifact metadata
     const auto& meta = reader.metadata();
+    model->config_.quant_scheme = meta.quant_scheme;
+    if (meta.quant_scheme.find("INT8-KV") != std::string::npos ||
+        (meta.properties.count("kv_quant_scheme") && meta.properties.at("kv_quant_scheme") == "INT8-KV")) {
+        model->config_.is_int8_kv = true;
+    }
 
     if (!meta.quant_scheme.empty()) {
         std::string expected_prefix = "INT4-G";

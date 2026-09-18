@@ -132,24 +132,58 @@ void forward_layer(sycl::queue& q,
         ops::rope(q, bufs.act_q, bufs.act_k, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, d_positions, cfg.rope_theta, cfg.rope_dim);
 
         // Write K and V into KV cache and perform Causal SDPA
-        if (d_dynamic_pos) {
-            ops::attention_write_kv_cache_dynamic(q, kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
-                                                  bufs.act_k, bufs.act_v, d_dynamic_pos, seq_len, cfg.num_key_value_heads, head_dim,
-                                                  static_cast<int64_t>(kv_cache.max_seq_len()));
+        if (kv_cache.is_int8()) {
+            if (d_dynamic_pos) {
+                ops::attention_write_kv_cache_int8_dynamic(
+                    q, kv_cache.k_cache_int8(full_idx), kv_cache.v_cache_int8(full_idx),
+                    kv_cache.k_scale(full_idx), kv_cache.v_scale(full_idx),
+                    kv_cache.k_zero_point(full_idx), kv_cache.v_zero_point(full_idx),
+                    bufs.act_k, bufs.act_v, d_dynamic_pos, seq_len, cfg.num_key_value_heads, head_dim,
+                    static_cast<int64_t>(kv_cache.max_seq_len()));
 
-            ops::sdpa_causal_cached_dynamic(q, bufs.act_attn_out, bufs.act_q,
-                                            kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
-                                            d_dynamic_pos, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, 0.0f,
-                                            static_cast<int64_t>(kv_cache.max_seq_len()));
+                ops::sdpa_causal_cached_int8_dynamic(
+                    q, bufs.act_attn_out, bufs.act_q,
+                    kv_cache.k_cache_int8(full_idx), kv_cache.v_cache_int8(full_idx),
+                    kv_cache.k_scale(full_idx), kv_cache.v_scale(full_idx),
+                    kv_cache.k_zero_point(full_idx), kv_cache.v_zero_point(full_idx),
+                    d_dynamic_pos, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, 0.0f,
+                    static_cast<int64_t>(kv_cache.max_seq_len()));
+            } else {
+                ops::attention_write_kv_cache_int8(
+                    q, kv_cache.k_cache_int8(full_idx), kv_cache.v_cache_int8(full_idx),
+                    kv_cache.k_scale(full_idx), kv_cache.v_scale(full_idx),
+                    kv_cache.k_zero_point(full_idx), kv_cache.v_zero_point(full_idx),
+                    bufs.act_k, bufs.act_v, start_pos, seq_len, cfg.num_key_value_heads, head_dim,
+                    static_cast<int64_t>(kv_cache.max_seq_len()));
+
+                ops::sdpa_causal_cached_int8(
+                    q, bufs.act_attn_out, bufs.act_q,
+                    kv_cache.k_cache_int8(full_idx), kv_cache.v_cache_int8(full_idx),
+                    kv_cache.k_scale(full_idx), kv_cache.v_scale(full_idx),
+                    kv_cache.k_zero_point(full_idx), kv_cache.v_zero_point(full_idx),
+                    start_pos, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, 0.0f,
+                    static_cast<int64_t>(kv_cache.max_seq_len()));
+            }
         } else {
-            ops::attention_write_kv_cache(q, kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
-                                          bufs.act_k, bufs.act_v, start_pos, seq_len, cfg.num_key_value_heads, head_dim,
-                                          static_cast<int64_t>(kv_cache.max_seq_len()));
+            if (d_dynamic_pos) {
+                ops::attention_write_kv_cache_dynamic(q, kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
+                                                      bufs.act_k, bufs.act_v, d_dynamic_pos, seq_len, cfg.num_key_value_heads, head_dim,
+                                                      static_cast<int64_t>(kv_cache.max_seq_len()));
 
-            ops::sdpa_causal_cached(q, bufs.act_attn_out, bufs.act_q,
-                                    kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
-                                    start_pos, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, 0.0f,
-                                    static_cast<int64_t>(kv_cache.max_seq_len()));
+                ops::sdpa_causal_cached_dynamic(q, bufs.act_attn_out, bufs.act_q,
+                                                kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
+                                                d_dynamic_pos, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, 0.0f,
+                                                static_cast<int64_t>(kv_cache.max_seq_len()));
+            } else {
+                ops::attention_write_kv_cache(q, kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
+                                              bufs.act_k, bufs.act_v, start_pos, seq_len, cfg.num_key_value_heads, head_dim,
+                                              static_cast<int64_t>(kv_cache.max_seq_len()));
+
+                ops::sdpa_causal_cached(q, bufs.act_attn_out, bufs.act_q,
+                                        kv_cache.k_cache(full_idx), kv_cache.v_cache(full_idx),
+                                        start_pos, seq_len, num_q_heads, cfg.num_key_value_heads, head_dim, 0.0f,
+                                        static_cast<int64_t>(kv_cache.max_seq_len()));
+            }
         }
 
         // Output gating: attn_out *= sigmoid(gate) matching torch.sigmoid(gate)
@@ -255,7 +289,11 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
                    int64_t seq_len,
                    int64_t start_pos,
                    bool zero_linear_state,
-                   float* out_last_token_logits) {
+                   float* out_last_token_logits,
+                   bool is_graph_capture,
+                   const LayerActivationBuffers* preallocated_bufs,
+                   int64_t* preallocated_token_ids,
+                   int64_t* preallocated_positions) {
     if (seq_len <= 0) return;
     if (start_pos < 0 || start_pos + seq_len > static_cast<int64_t>(kv_cache.max_seq_len())) {
         std::cerr << "[xinfer::qwen3_8] Error: forward_chunk bounds exceeded: start_pos="
@@ -265,14 +303,19 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
     }
     sycl::queue& q = ctx->queue();
 
-    arena.reset();
+    // Graph Capture Contract: never reset arena during graph capture or when using preallocated buffers
+    if (!is_graph_capture && !preallocated_bufs) {
+        arena.reset();
+    }
 
     // Copy token IDs to device
-    int64_t* d_token_ids = static_cast<int64_t*>(arena.allocate(seq_len * sizeof(int64_t)));
+    int64_t* d_token_ids = preallocated_token_ids ? preallocated_token_ids
+        : static_cast<int64_t*>(arena.allocate(seq_len * sizeof(int64_t)));
     ctx->copy_host_to_device(d_token_ids, token_ids, seq_len * sizeof(int64_t), true);
 
     // Positions for RoPE (start_pos ... start_pos + seq_len - 1)
-    int64_t* d_positions = static_cast<int64_t*>(arena.allocate(seq_len * sizeof(int64_t)));
+    int64_t* d_positions = preallocated_positions ? preallocated_positions
+        : static_cast<int64_t*>(arena.allocate(seq_len * sizeof(int64_t)));
     std::vector<int64_t> host_pos(seq_len);
     for (int64_t i = 0; i < seq_len; ++i) host_pos[i] = start_pos + i;
     ctx->copy_host_to_device(d_positions, host_pos.data(), seq_len * sizeof(int64_t), true);
@@ -283,23 +326,27 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
     const int64_t intermediate_size = cfg.intermediate_size;
 
     LayerActivationBuffers bufs;
-    bufs.act_x = static_cast<sycl::half*>(arena.allocate(seq_len * hidden_size * sizeof(sycl::half)));
-    bufs.act_normed = static_cast<sycl::half*>(arena.allocate(seq_len * hidden_size * sizeof(sycl::half)));
-    bufs.act_proj_out = static_cast<sycl::half*>(arena.allocate(seq_len * hidden_size * sizeof(sycl::half)));
-    bufs.act_mlp_gate = static_cast<sycl::half*>(arena.allocate(seq_len * intermediate_size * sizeof(sycl::half)));
+    if (preallocated_bufs) {
+        bufs = *preallocated_bufs;
+    } else {
+        bufs.act_x        = static_cast<sycl::half*>(arena.allocate(seq_len * hidden_size * sizeof(sycl::half)));
+        bufs.act_normed   = static_cast<sycl::half*>(arena.allocate(seq_len * hidden_size * sizeof(sycl::half)));
+        bufs.act_proj_out = static_cast<sycl::half*>(arena.allocate(seq_len * hidden_size * sizeof(sycl::half)));
+        bufs.act_mlp_gate = static_cast<sycl::half*>(arena.allocate(seq_len * intermediate_size * sizeof(sycl::half)));
 
-    bufs.act_q_gate   = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_q_gate_dim() * sizeof(sycl::half)));
-    bufs.act_q        = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_q_dim() * sizeof(sycl::half)));
-    bufs.act_k        = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_k_dim() * sizeof(sycl::half)));
-    bufs.act_v        = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_v_dim() * sizeof(sycl::half)));
-    bufs.act_attn_out = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_out_dim() * sizeof(sycl::half)));
+        bufs.act_q_gate   = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_q_gate_dim() * sizeof(sycl::half)));
+        bufs.act_q        = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_q_dim() * sizeof(sycl::half)));
+        bufs.act_k        = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_k_dim() * sizeof(sycl::half)));
+        bufs.act_v        = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_v_dim() * sizeof(sycl::half)));
+        bufs.act_attn_out = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.full_out_dim() * sizeof(sycl::half)));
 
-    bufs.act_qkv_raw   = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_conv_channels * sizeof(sycl::half)));
-    bufs.act_qkv_conv  = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_conv_channels * sizeof(sycl::half)));
-    bufs.act_z         = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_z_dim * sizeof(sycl::half)));
-    bufs.act_b         = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_b_dim * sizeof(sycl::half)));
-    bufs.act_a         = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_a_dim * sizeof(sycl::half)));
-    bufs.act_delta_out = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_z_dim * sizeof(sycl::half)));
+        bufs.act_qkv_raw   = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_conv_channels * sizeof(sycl::half)));
+        bufs.act_qkv_conv  = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_conv_channels * sizeof(sycl::half)));
+        bufs.act_z         = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_z_dim * sizeof(sycl::half)));
+        bufs.act_b         = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_b_dim * sizeof(sycl::half)));
+        bufs.act_a         = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_a_dim * sizeof(sycl::half)));
+        bufs.act_delta_out = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_z_dim * sizeof(sycl::half)));
+    }
 
     // 1. Initial embedding lookup
     embed_tokens_lookup(q, bufs.act_x, model.d_embed_tokens(), d_token_ids, seq_len, hidden_size, cfg.vocab_size);
@@ -325,12 +372,14 @@ int64_t prefill_prompt(std::shared_ptr<core::DeviceContext> ctx,
                        const qwen3_8_27b::LoadedModel& model,
                        core::KVCache& kv_cache,
                        const std::vector<int64_t>& prompt_tokens,
-                       size_t chunk_size) {
+                       size_t chunk_size,
+                       bool is_graph_capture) {
     if (prompt_tokens.empty()) return 0;
     if (prompt_tokens.size() > kv_cache.max_seq_len()) {
-        std::cerr << "[xinfer::qwen3_8] Error: Prompt tokens (" << prompt_tokens.size()
-                  << ") exceeds KV cache max_seq_len (" << kv_cache.max_seq_len() << ")" << std::endl;
-        return -1;
+        std::string err = "context_length_exceeded: Prompt tokens (" + std::to_string(prompt_tokens.size()) +
+                          ") exceeds KV cache max_seq_len (" + std::to_string(kv_cache.max_seq_len()) + ")";
+        std::cerr << "[xinfer::qwen3_8] Error: " << err << std::endl;
+        throw context_length_exceeded(err);
     }
     const auto& cfg = model.config();
     for (size_t i = 0; i < prompt_tokens.size(); ++i) {
@@ -347,8 +396,38 @@ int64_t prefill_prompt(std::shared_ptr<core::DeviceContext> ctx,
 
     float* d_logits = static_cast<float*>(arena.persistent_buffer(cfg.vocab_size * sizeof(float)));
 
+    // Graph Capture Contract: pre-allocate persistent activation buffers for chunk_size in DeviceArena
+    // before beginning graph recording / chunk loop to guarantee address stability without resetting arena
+    LayerActivationBuffers chunk_bufs;
+    int64_t* d_chunk_tokens = nullptr;
+    int64_t* d_chunk_positions = nullptr;
+
+    if (is_graph_capture) {
+        d_chunk_tokens = static_cast<int64_t*>(arena.allocate_persistent(chunk_size * sizeof(int64_t)));
+        d_chunk_positions = static_cast<int64_t*>(arena.allocate_persistent(chunk_size * sizeof(int64_t)));
+
+        chunk_bufs.act_x        = static_cast<sycl::half*>(arena.allocate_persistent(chunk_size * cfg.hidden_size * sizeof(sycl::half)));
+        chunk_bufs.act_normed   = static_cast<sycl::half*>(arena.allocate_persistent(chunk_size * cfg.hidden_size * sizeof(sycl::half)));
+        chunk_bufs.act_proj_out = static_cast<sycl::half*>(arena.allocate_persistent(chunk_size * cfg.hidden_size * sizeof(sycl::half)));
+        chunk_bufs.act_mlp_gate = static_cast<sycl::half*>(arena.allocate_persistent(chunk_size * cfg.intermediate_size * sizeof(sycl::half)));
+
+        chunk_bufs.act_q_gate   = static_cast<sycl::half*>(arena.allocate_persistent(chunk_size * cfg.full_q_gate_dim() * sizeof(sycl::half)));
+        chunk_bufs.act_q        = static_cast<sycl::half*>(arena.allocate_persistent(chunk_size * cfg.full_q_dim() * sizeof(sycl::half)));
+        chunk_bufs.act_k        = static_cast<sycl::half*>(arena.allocate_persistent(chunk_size * cfg.full_k_dim() * sizeof(sycl::half)));
+        chunk_bufs.act_v        = static_cast<sycl::half*>(arena.allocate_persistent(chunk_size * cfg.full_v_dim() * sizeof(sycl::half)));
+        chunk_bufs.act_attn_out = static_cast<sycl::half*>(arena.allocate_persistent(chunk_size * cfg.full_out_dim() * sizeof(sycl::half)));
+
+        chunk_bufs.act_qkv_raw   = static_cast<sycl::half*>(arena.allocate_persistent(chunk_size * cfg.linear_conv_channels * sizeof(sycl::half)));
+        chunk_bufs.act_qkv_conv  = static_cast<sycl::half*>(arena.allocate_persistent(chunk_size * cfg.linear_conv_channels * sizeof(sycl::half)));
+        chunk_bufs.act_z         = static_cast<sycl::half*>(arena.allocate_persistent(chunk_size * cfg.linear_z_dim * sizeof(sycl::half)));
+        chunk_bufs.act_b         = static_cast<sycl::half*>(arena.allocate_persistent(chunk_size * cfg.linear_b_dim * sizeof(sycl::half)));
+        chunk_bufs.act_a         = static_cast<sycl::half*>(arena.allocate_persistent(chunk_size * cfg.linear_a_dim * sizeof(sycl::half)));
+        chunk_bufs.act_delta_out = static_cast<sycl::half*>(arena.allocate_persistent(chunk_size * cfg.linear_z_dim * sizeof(sycl::half)));
+    }
+
     size_t total_tokens = prompt_tokens.size();
     size_t offset = 0;
+    int64_t start_pos = 0;
 
     while (offset < total_tokens) {
         size_t cur_chunk = std::min(chunk_size, total_tokens - offset);
@@ -358,10 +437,15 @@ int64_t prefill_prompt(std::shared_ptr<core::DeviceContext> ctx,
         forward_chunk(ctx, arena, model, kv_cache,
                       prompt_tokens.data() + offset,
                       cur_chunk,
-                      offset,
+                      start_pos,
                       zero_linear,
-                      is_last ? d_logits : nullptr);
+                      is_last ? d_logits : nullptr,
+                      is_graph_capture,
+                      is_graph_capture ? &chunk_bufs : nullptr,
+                      d_chunk_tokens,
+                      d_chunk_positions);
 
+        start_pos += static_cast<int64_t>(cur_chunk);
         offset += cur_chunk;
     }
 
