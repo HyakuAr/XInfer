@@ -16,6 +16,8 @@ struct ChatTemplateOptions {
     bool        enable_thinking{true};
     std::string reasoning_effort{""}; // Empty defaults to template's default_reasoning_effort ("xhigh", "medium", "low")
     bool        preserve_thinking{true};
+    size_t      patches_per_image{256};            // ViT patch token expansion factor (256 patches per image)
+    std::string image_pad_token{"<|image_pad|>"}; // Target visual padding token
 };
 
 // ============================================================================

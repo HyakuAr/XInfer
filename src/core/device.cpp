@@ -1,6 +1,10 @@
 #include "device.h"
 #include <iostream>
 #include <stdexcept>
+#include <cmath>
+#include <iomanip>
+#include <sstream>
+#include <cstdlib>
 
 namespace xinfer::core {
 
@@ -188,4 +192,218 @@ void DeviceContext::synchronize() {
     queue_.wait();
 }
 
+// ----------------------------------------------------------------------------
+// Image dimension parsing and validation (fail-loud contract)
+// ----------------------------------------------------------------------------
+
+bool parse_image_dimensions(const uint8_t* data, size_t size, ImageDimensions& out_dims, std::string* error_msg) {
+    if (!data || size == 0) {
+        if (error_msg) *error_msg = "Image data buffer is empty";
+        return false;
+    }
+
+    // 1. Check PNG: 8-byte signature 89 50 4E 47 0D 0A 1A 0A
+    if (size >= 24 &&
+        data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47 &&
+        data[4] == 0x0D && data[5] == 0x0A && data[6] == 0x1A && data[7] == 0x0A) {
+        // IHDR chunk: starts at byte 12 ("IHDR")
+        if (data[12] == 'I' && data[13] == 'H' && data[14] == 'D' && data[15] == 'R') {
+            uint32_t w = (static_cast<uint32_t>(data[16]) << 24) |
+                         (static_cast<uint32_t>(data[17]) << 16) |
+                         (static_cast<uint32_t>(data[18]) << 8)  |
+                         static_cast<uint32_t>(data[19]);
+            uint32_t h = (static_cast<uint32_t>(data[20]) << 24) |
+                         (static_cast<uint32_t>(data[21]) << 16) |
+                         (static_cast<uint32_t>(data[22]) << 8)  |
+                         static_cast<uint32_t>(data[23]);
+            out_dims.width = static_cast<int64_t>(w);
+            out_dims.height = static_cast<int64_t>(h);
+            out_dims.channels = 3;
+            return true;
+        }
+    }
+
+    // 2. Check BMP: 'B' 'M' signature
+    if (size >= 26 && data[0] == 'B' && data[1] == 'M') {
+        int32_t w = static_cast<int32_t>(data[18] | (data[19] << 8) | (data[20] << 16) | (data[21] << 24));
+        int32_t h = static_cast<int32_t>(data[22] | (data[23] << 8) | (data[24] << 16) | (data[25] << 24));
+        out_dims.width = static_cast<int64_t>(std::abs(w));
+        out_dims.height = static_cast<int64_t>(std::abs(h));
+        out_dims.channels = 3;
+        return true;
+    }
+
+    // 3. Check JPEG: FF D8 signature
+    if (size >= 4 && data[0] == 0xFF && data[1] == 0xD8) {
+        size_t pos = 2;
+        while (pos + 4 <= size) {
+            if (data[pos] != 0xFF) {
+                pos++;
+                continue;
+            }
+            uint8_t marker = data[pos + 1];
+            if (marker == 0xD9 || marker == 0xDA) { // EOI or SOS
+                break;
+            }
+            if (marker == 0xD8 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) {
+                pos += 2;
+                continue;
+            }
+            if (pos + 4 > size) break;
+            uint16_t seg_len = (static_cast<uint16_t>(data[pos + 2]) << 8) | static_cast<uint16_t>(data[pos + 3]);
+            // SOF0..SOF15 (except DHT 0xC4, JPG 0xC8, DAC 0xCC)
+            if (marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 && marker != 0xCC) {
+                if (pos + 9 <= size) {
+                    uint16_t h = (static_cast<uint16_t>(data[pos + 5]) << 8) | static_cast<uint16_t>(data[pos + 6]);
+                    uint16_t w = (static_cast<uint16_t>(data[pos + 7]) << 8) | static_cast<uint16_t>(data[pos + 8]);
+                    uint8_t comps = data[pos + 9];
+                    out_dims.width = static_cast<int64_t>(w);
+                    out_dims.height = static_cast<int64_t>(h);
+                    out_dims.channels = (comps > 0) ? comps : 3;
+                    return true;
+                }
+            }
+            pos += 2 + seg_len;
+        }
+    }
+
+    if (out_dims.width > 0 && out_dims.height > 0) {
+        return true;
+    }
+
+    if (error_msg) {
+        *error_msg = "Unrecognized image format or missing valid image header (supported: PNG, BMP, JPEG)";
+    }
+    return false;
+}
+
+bool validate_image_dimensions(int64_t width, int64_t height,
+                               int64_t max_resolution,
+                               float max_aspect_ratio,
+                               std::string* error_msg) {
+    if (width <= 0 || height <= 0) {
+        if (error_msg) *error_msg = "Invalid image dimensions: width and height must be positive";
+        return false;
+    }
+    if (width > max_resolution || height > max_resolution) {
+        if (error_msg) {
+            *error_msg = "Image resolution (" + std::to_string(width) + "x" + std::to_string(height) +
+                         ") exceeds maximum allowed resolution (" + std::to_string(max_resolution) + "x" +
+                         std::to_string(max_resolution) + ")";
+        }
+        return false;
+    }
+    float aspect_ratio = (width >= height) ? static_cast<float>(width) / static_cast<float>(height)
+                                           : static_cast<float>(height) / static_cast<float>(width);
+    if (aspect_ratio > max_aspect_ratio) {
+        if (error_msg) {
+            std::ostringstream ss;
+            ss << std::fixed << std::setprecision(2) << aspect_ratio;
+            *error_msg = "Image aspect ratio (" + ss.str() + ":1) exceeds maximum allowed aspect ratio (" +
+                         std::to_string(static_cast<int>(max_aspect_ratio)) + ":1)";
+        }
+        return false;
+    }
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// Offloaded image resizing and normalization to USM
+// ----------------------------------------------------------------------------
+// Grounding source: docs/vendor/xe-gpu-architecture.md & docs/vendor/thread-mapping-occupancy.md
+// Xe2-HPG Battlemage B60 has 64 hardware threads per Xe-Core (8 Vector Engines * 8 threads/VE).
+// Launching workgroups of 256 work-items (8 subgroups of 32 work-items) utilizes 8 hardware threads
+// per Xe-Core, cleanly mapping to the vector execution pipeline.
+// Memory allocations use 64-byte alignment matching the Xe2 cache-line DMA transaction width.
+
+sycl::half* preprocess_image_to_usm(
+    DeviceContext& ctx,
+    const uint8_t* rgb_pixels,
+    int64_t src_w,
+    int64_t src_h,
+    int64_t channels,
+    int64_t dst_w,
+    int64_t dst_h,
+    bool use_shared_mem,
+    sycl::half* out_buffer
+) {
+    if (!rgb_pixels || src_w <= 0 || src_h <= 0 || channels <= 0) {
+        throw std::invalid_argument("Invalid image input buffer or dimensions in preprocess_image_to_usm");
+    }
+
+    // Number of patches: 16x16 = 256 patches
+    // Patch size: 14x14 pixels
+    // In-channels: 3
+    // Patch dimension = 3 * 14 * 14 = 588 elements
+    // Total half elements = 256 * 588 = 150,528 elements
+    const size_t total_elements = 256 * 588; // 150528
+    const size_t total_bytes = total_elements * sizeof(sycl::half);
+
+    sycl::half* d_out = out_buffer;
+    if (!d_out) {
+        if (use_shared_mem) {
+            d_out = static_cast<sycl::half*>(sycl::aligned_alloc_shared(64, total_bytes, ctx.queue()));
+        } else {
+            d_out = static_cast<sycl::half*>(ctx.allocate_device(total_bytes, 64));
+        }
+    }
+
+    // Allocate temporary device buffer for input RGB image
+    size_t src_bytes = static_cast<size_t>(src_w * src_h * channels);
+    uint8_t* d_src = static_cast<uint8_t*>(ctx.allocate_device(src_bytes, 64));
+    ctx.copy_host_to_device(d_src, rgb_pixels, src_bytes, true);
+
+    // Launch nd_range<1> with work-group size 256. 150,528 / 256 = 588 work-groups.
+    auto ev = ctx.queue().submit([&](sycl::handler& cgh) {
+        cgh.parallel_for(
+            sycl::nd_range<1>(sycl::range<1>(total_elements), sycl::range<1>(256)),
+            [=](sycl::nd_item<1> item) {
+                size_t idx = item.get_global_id(0);
+                if (idx >= total_elements) return;
+
+                int64_t patch_idx = static_cast<int64_t>(idx / 588);
+                int64_t elem_in_patch = static_cast<int64_t>(idx % 588);
+                int64_t patch_y = patch_idx / 16;
+                int64_t patch_x = patch_idx % 16;
+
+                int64_t c = elem_in_patch / (14 * 14);
+                int64_t rem = elem_in_patch % (14 * 14);
+                int64_t py = rem / 14;
+                int64_t px = rem % 14;
+
+                int64_t cur_dst_y = patch_y * 14 + py;
+                int64_t cur_dst_x = patch_x * 14 + px;
+
+                float u = (static_cast<float>(cur_dst_x) + 0.5f) * (static_cast<float>(src_w) / static_cast<float>(dst_w)) - 0.5f;
+                float v = (static_cast<float>(cur_dst_y) + 0.5f) * (static_cast<float>(src_h) / static_cast<float>(dst_h)) - 0.5f;
+
+                int64_t x0 = sycl::clamp(static_cast<int64_t>(sycl::floor(u)), (int64_t)0, src_w - 1);
+                int64_t x1 = sycl::clamp(x0 + 1, (int64_t)0, src_w - 1);
+                int64_t y0 = sycl::clamp(static_cast<int64_t>(sycl::floor(v)), (int64_t)0, src_h - 1);
+                int64_t y1 = sycl::clamp(y0 + 1, (int64_t)0, src_h - 1);
+
+                float fx = u - sycl::floor(u);
+                float fy = v - sycl::floor(v);
+                if (x0 == x1) fx = 0.0f;
+                if (y0 == y1) fy = 0.0f;
+
+                float p00 = static_cast<float>(d_src[(y0 * src_w + x0) * channels + c]);
+                float p10 = static_cast<float>(d_src[(y0 * src_w + x1) * channels + c]);
+                float p01 = static_cast<float>(d_src[(y1 * src_w + x0) * channels + c]);
+                float p11 = static_cast<float>(d_src[(y1 * src_w + x1) * channels + c]);
+
+                float sample = (p00 * (1.0f - fx) + p10 * fx) * (1.0f - fy) +
+                               (p01 * (1.0f - fx) + p11 * fx) * fy;
+
+                // Normalize [0, 255] -> [-1.0, 1.0]
+                float norm_val = (sample / 127.5f) - 1.0f;
+                d_out[idx] = static_cast<sycl::half>(norm_val);
+            });
+    });
+    ev.wait();
+    ctx.free_device(d_src);
+    return d_out;
+}
+
 } // namespace xinfer::core
+

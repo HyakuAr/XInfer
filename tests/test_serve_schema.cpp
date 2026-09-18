@@ -1,6 +1,8 @@
 #include "serve/protocol.h"
 #include "serve/server.h"
 #include "xinfer/engine.h"
+#include "core/device.h"
+#include "targets/qwen3_8/chat_template.h"
 #include <iostream>
 #include <cassert>
 #include <cmath>
@@ -31,7 +33,10 @@ using test_socket_t = int;
 #define TEST_IS_VALID(s) ((s) >= 0)
 #endif
 
+using namespace xinfer;
 using namespace xinfer::serve;
+using namespace xinfer::core;
+using namespace xinfer::targets::qwen3_8;
 
 void test_parse_valid_single_turn_request() {
     std::cout << "[Test 1/5] Parse valid single-turn request..." << std::endl;
@@ -503,6 +508,251 @@ void test_server_request_hardening() {
     std::cout << "  -> PASSED: Server request hardening verified (chunked rejection, max_tokens <= 0 rejection, and recv timeout)." << std::endl;
 }
 
+void test_base64_chunked_decoder() {
+    std::cout << "[Test 11/16] Chunked Base64 Decoder..." << std::endl;
+    // 1. Valid base64: "Hello, World!" -> "SGVsbG8sIFdvcmxkIQ=="
+    std::string b64 = "SGVsbG8sIFdvcmxkIQ==";
+    std::vector<uint8_t> bytes;
+    std::string err;
+    assert(decode_base64_chunked(b64, bytes, &err));
+    std::string decoded(bytes.begin(), bytes.end());
+    assert(decoded == "Hello, World!");
+
+    // 2. Data URL prefix
+    std::string data_url = "data:image/png;base64,SGVsbG8sIFdvcmxkIQ==";
+    bytes.clear();
+    assert(decode_base64_chunked(data_url, bytes, &err));
+    decoded.assign(bytes.begin(), bytes.end());
+    assert(decoded == "Hello, World!");
+
+    // 3. Invalid base64 character
+    bytes.clear();
+    assert(!decode_base64_chunked("SGVs!@#$%", bytes, &err));
+    assert(!err.empty());
+
+    std::cout << "  -> PASSED: Chunked Base64 Decoder verified." << std::endl;
+}
+
+void test_multipart_parser() {
+    std::cout << "[Test 12/16] Multipart/Form-Data Parser..." << std::endl;
+    std::string boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
+    std::string body =
+        "------WebKitFormBoundary7MA4YWxkTrZu0gW\r\n"
+        "Content-Disposition: form-data; name=\"messages\"\r\n\r\n"
+        "{\"messages\": [{\"role\": \"user\", \"content\": \"What is in this image?\"}]}\r\n"
+        "------WebKitFormBoundary7MA4YWxkTrZu0gW\r\n"
+        "Content-Disposition: form-data; name=\"image\"; filename=\"test.png\"\r\n"
+        "Content-Type: image/png\r\n\r\n"
+        "FAKEDATABYTES\r\n"
+        "------WebKitFormBoundary7MA4YWxkTrZu0gW--\r\n";
+
+    ChatCompletionRequest req;
+    ApiError err;
+    assert(parse_multipart_chat_completion_request(body, boundary, req, err));
+    assert(req.messages.size() == 1);
+    assert(req.messages[0].role == "user");
+    // Notice automatic <image> tag prepend since user didn't explicitly include <image>
+    assert(req.messages[0].content.find("<image>") != std::string::npos);
+    assert(req.images.size() == 1);
+    assert(req.images[0].format == "image/png");
+    std::string img_data(req.images[0].raw_bytes.begin(), req.images[0].raw_bytes.end());
+    assert(img_data == "FAKEDATABYTES");
+
+    std::cout << "  -> PASSED: Multipart/Form-Data Parser verified." << std::endl;
+}
+
+void test_chat_template_image_expansion() {
+    std::cout << "[Test 13/16] Chat Template <image> Expansion to 256 <|image_pad|> Tokens..." << std::endl;
+    targets::qwen3_8::QwenChatTemplate tmpl;
+    std::vector<ChatMessage> msgs = {
+        ChatMessage{.role = "user", .content = "Describe this picture: <image>", .reasoning_content = ""}
+    };
+    targets::qwen3_8::ChatTemplateOptions opts;
+    opts.patches_per_image = 256;
+    opts.image_pad_token = "<|image_pad|>";
+    std::string rendered = tmpl.render(msgs, opts);
+
+    // Count occurrences of "<|image_pad|>"
+    size_t count = 0;
+    size_t pos = 0;
+    while ((pos = rendered.find("<|image_pad|>", pos)) != std::string::npos) {
+        count++;
+        pos += std::string_view("<|image_pad|>").size();
+    }
+    assert(count == 256);
+    assert(rendered.find("<image>") == std::string::npos);
+
+    std::cout << "  -> PASSED: Chat Template expanded <image> to exactly 256 <|image_pad|> tokens." << std::endl;
+}
+
+void test_image_dimension_validation() {
+    std::cout << "[Test 14/16] Image Dimension & Fail-Loud Contract Validation..." << std::endl;
+    // Valid dimensions
+    std::string err;
+    assert(core::validate_image_dimensions(224, 224, 1024, 4.0f, &err));
+    assert(core::validate_image_dimensions(1024, 1024, 1024, 4.0f, &err));
+    assert(core::validate_image_dimensions(800, 200, 1024, 4.0f, &err)); // 4:1 aspect ratio
+    assert(core::validate_image_dimensions(200, 800, 1024, 4.0f, &err)); // 1:4 aspect ratio
+
+    // Exceed max resolution (> 1024)
+    assert(!core::validate_image_dimensions(1025, 512, 1024, 4.0f, &err));
+    assert(err.find("exceeds maximum allowed resolution") != std::string::npos);
+
+    assert(!core::validate_image_dimensions(512, 1200, 1024, 4.0f, &err));
+    assert(err.find("exceeds maximum allowed resolution") != std::string::npos);
+
+    // Exceed max aspect ratio (> 4:1)
+    assert(!core::validate_image_dimensions(900, 150, 1024, 4.0f, &err)); // 6:1 aspect ratio
+    assert(err.find("exceeds maximum allowed aspect ratio") != std::string::npos);
+
+    assert(!core::validate_image_dimensions(150, 900, 1024, 4.0f, &err)); // 1:6 aspect ratio
+    assert(err.find("exceeds maximum allowed aspect ratio") != std::string::npos);
+
+    // PNG Header parsing
+    uint8_t mock_png[30] = {
+        0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, // signature
+        0x00, 0x00, 0x00, 0x0D, // length
+        'I', 'H', 'D', 'R',     // type
+        0x00, 0x00, 0x01, 0x00, // width = 256 (0x100)
+        0x00, 0x00, 0x00, 0x80, // height = 128 (0x80)
+        0x08, 0x02, 0x00, 0x00, 0x00
+    };
+    core::ImageDimensions dims;
+    assert(core::parse_image_dimensions(mock_png, sizeof(mock_png), dims, &err));
+    assert(dims.width == 256);
+    assert(dims.height == 128);
+
+    // BMP Header parsing
+    uint8_t mock_bmp[30] = {
+        'B', 'M', // signature
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // file header
+        0, 0, 0, 0, // DIB header size
+        0x40, 0x01, 0x00, 0x00, // width = 320 (0x140)
+        0xF0, 0x00, 0x00, 0x00  // height = 240 (0xF0)
+    };
+    assert(core::parse_image_dimensions(mock_bmp, sizeof(mock_bmp), dims, &err));
+    assert(dims.width == 320);
+    assert(dims.height == 240);
+
+    std::cout << "  -> PASSED: Image dimension parsing & fail-loud bounds verified." << std::endl;
+}
+
+void test_server_fail_loud_image_resolution() {
+    std::cout << "[Test 15/16] Server HTTP 400 Fail-Loud for Oversized Image / Aspect Ratio..." << std::endl;
+    Engine mock_engine;
+    HttpServer server(mock_engine);
+    ServerConfig cfg;
+    cfg.port = 0;
+    cfg.num_workers = 1;
+    cfg.recv_timeout_sec = 2;
+    std::string err_msg;
+    assert(server.start(cfg, &err_msg));
+    int port = server.port();
+    assert(port > 0);
+
+    // 1. Send multipart request with oversized PNG (2000x2000)
+    {
+        uint8_t oversized_png[30] = {
+            0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A,
+            0x00, 0x00, 0x00, 0x0D,
+            'I', 'H', 'D', 'R',
+            0x00, 0x00, 0x07, 0xD0, // width = 2000
+            0x00, 0x00, 0x07, 0xD0, // height = 2000
+            0x08, 0x02, 0x00, 0x00, 0x00
+        };
+        std::string img_bytes(reinterpret_cast<char*>(oversized_png), sizeof(oversized_png));
+        std::string boundary = "----TestBoundary123";
+        std::string body =
+            "------TestBoundary123\r\n"
+            "Content-Disposition: form-data; name=\"messages\"\r\n\r\n"
+            "{\"messages\": [{\"role\": \"user\", \"content\": \"Inspect this\"}]}\r\n"
+            "------TestBoundary123\r\n"
+            "Content-Disposition: form-data; name=\"image\"; filename=\"huge.png\"\r\n"
+            "Content-Type: image/png\r\n\r\n" +
+            img_bytes + "\r\n"
+            "------TestBoundary123--\r\n";
+
+        std::string req =
+            "POST /v1/chat/completions HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Content-Type: multipart/form-data; boundary=----TestBoundary123\r\n"
+            "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body;
+
+        test_socket_t s = connect_to_server(port);
+        assert(TEST_IS_VALID(s));
+        std::string resp = send_and_recv_response(s, req);
+        assert(resp.find("400 Bad Request") != std::string::npos);
+        assert(resp.find("image_resolution_exceeded") != std::string::npos ||
+               resp.find("exceeds maximum allowed resolution") != std::string::npos);
+    }
+
+    // 2. Send multipart request with invalid aspect ratio (1000x100 = 10:1)
+    {
+        uint8_t wide_png[30] = {
+            0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A,
+            0x00, 0x00, 0x00, 0x0D,
+            'I', 'H', 'D', 'R',
+            0x00, 0x00, 0x03, 0xE8, // width = 1000
+            0x00, 0x00, 0x00, 0x64, // height = 100 (10:1 ratio)
+            0x08, 0x02, 0x00, 0x00, 0x00
+        };
+        std::string img_bytes(reinterpret_cast<char*>(wide_png), sizeof(wide_png));
+        std::string boundary = "----TestBoundary123";
+        std::string body =
+            "------TestBoundary123\r\n"
+            "Content-Disposition: form-data; name=\"messages\"\r\n\r\n"
+            "{\"messages\": [{\"role\": \"user\", \"content\": \"Inspect this\"}]}\r\n"
+            "------TestBoundary123\r\n"
+            "Content-Disposition: form-data; name=\"image\"; filename=\"wide.png\"\r\n"
+            "Content-Type: image/png\r\n\r\n" +
+            img_bytes + "\r\n"
+            "------TestBoundary123--\r\n";
+
+        std::string req =
+            "POST /v1/chat/completions HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Content-Type: multipart/form-data; boundary=----TestBoundary123\r\n"
+            "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body;
+
+        test_socket_t s = connect_to_server(port);
+        assert(TEST_IS_VALID(s));
+        std::string resp = send_and_recv_response(s, req);
+        assert(resp.find("400 Bad Request") != std::string::npos);
+        assert(resp.find("image_aspect_ratio_exceeded") != std::string::npos ||
+               resp.find("exceeds maximum allowed aspect ratio") != std::string::npos);
+    }
+
+    server.stop();
+    std::cout << "  -> PASSED: Server HTTP 400 Bad Request fail-loud contract verified." << std::endl;
+}
+
+void test_usm_image_preprocessing() {
+    std::cout << "[Test 16/16] GPU USM Image Preprocessing (Bilinear Resize & Normalization)..." << std::endl;
+    auto ctx = core::DeviceContext::create(true);
+    int64_t src_w = 64;
+    int64_t src_h = 64;
+    int64_t channels = 3;
+    std::vector<uint8_t> pixels(src_w * src_h * channels);
+    for (size_t i = 0; i < pixels.size(); ++i) {
+        pixels[i] = static_cast<uint8_t>(i % 256);
+    }
+
+    sycl::half* d_preprocessed = core::preprocess_image_to_usm(*ctx, pixels.data(), src_w, src_h, channels, 224, 224, false);
+    assert(d_preprocessed != nullptr);
+
+    size_t total_elements = 256 * 588;
+    std::vector<sycl::half> h_out(total_elements);
+    ctx->copy_device_to_host(h_out.data(), d_preprocessed, total_elements * sizeof(sycl::half), true);
+
+    for (size_t i = 0; i < 100; ++i) {
+        float v = static_cast<float>(h_out[i]);
+        assert(v >= -1.05f && v <= 1.05f);
+    }
+
+    ctx->free_device(d_preprocessed);
+    std::cout << "  -> PASSED: GPU USM Image Preprocessing verified." << std::endl;
+}
+
 int main() {
     std::cout << "==========================================================" << std::endl;
     std::cout << " xinfer Milestone 9 OpenAI Serving Protocol & Schema Test" << std::endl;
@@ -518,10 +768,17 @@ int main() {
     test_top_p_parsing();
     test_reasoning_content_serialization();
     test_server_request_hardening();
+    test_base64_chunked_decoder();
+    test_multipart_parser();
+    test_chat_template_image_expansion();
+    test_image_dimension_validation();
+    test_server_fail_loud_image_resolution();
+    test_usm_image_preprocessing();
 
     std::cout << "==========================================================" << std::endl;
-    std::cout << " ALL MILESTONE 9 SCHEMA TESTS PASSED!" << std::endl;
+    std::cout << " ALL MILESTONE 9 SCHEMA & MULTIMODAL TESTS PASSED!" << std::endl;
     std::cout << "==========================================================" << std::endl;
     return 0;
 }
+
 

@@ -31,11 +31,44 @@ struct JsonValue {
 bool parse_json(std::string_view input, JsonValue& out, std::string& error_msg);
 void escape_json_string(std::string& out, std::string_view str);
 
+// Non-blocking, chunked base64 decoder
+bool decode_base64_chunked(std::string_view input,
+                           std::vector<uint8_t>& out_bytes,
+                           std::string* error_msg = nullptr,
+                           size_t chunk_size = 4096);
+
+// Lightweight multipart/form-data parser
+struct MultipartPart {
+    std::string name;
+    std::string filename;
+    std::string content_type;
+    std::string data;
+};
+
+struct MultipartFormData {
+    std::vector<MultipartPart> parts;
+    const MultipartPart* find_part(const std::string& name) const;
+};
+
+bool parse_multipart_form_data(std::string_view body,
+                               std::string_view boundary,
+                               MultipartFormData& out_form,
+                               std::string* error_msg = nullptr);
+
+struct ImagePayload {
+    std::vector<uint8_t> raw_bytes;
+    int64_t width{0};
+    int64_t height{0};
+    int64_t channels{3};
+    std::string format; // "jpeg", "png", "bmp", "raw"
+};
+
 using xinfer::ChatMessage;
 
 struct ChatCompletionRequest {
     std::string model{"qwen3.8-27b"};
     std::vector<ChatMessage> messages;
+    std::vector<ImagePayload> images;
     int max_tokens{256};
     float temperature{0.0f};
     float top_p{1.0f};
@@ -104,6 +137,12 @@ ApiError make_context_length_exceeded_error(size_t max_seq_len, size_t prompt_to
 bool parse_chat_completion_request(std::string_view json_str,
                                    ChatCompletionRequest& out_req,
                                    ApiError& out_err);
+
+// High-level multipart/form-data request parser
+bool parse_multipart_chat_completion_request(std::string_view body,
+                                             std::string_view boundary,
+                                             ChatCompletionRequest& out_req,
+                                             ApiError& out_err);
 
 // Helper to generate unique chat completion IDs: "chatcmpl-<hex>"
 std::string generate_completion_id();

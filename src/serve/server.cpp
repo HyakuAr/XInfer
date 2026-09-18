@@ -1,4 +1,5 @@
 #include "server.h"
+#include "core/device.h"
 #include <sycl/sycl.hpp>
 #include <iostream>
 #include <sstream>
@@ -334,6 +335,7 @@ void HttpServer::handle_client(uintptr_t client_socket) {
     std::getline(h_stream, line); // consume remainder of first line
     size_t content_length = 0;
     bool is_chunked = false;
+    std::string content_type;
 
     while (std::getline(h_stream, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -344,7 +346,9 @@ void HttpServer::handle_client(uintptr_t client_socket) {
             while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.erase(val.begin());
             while (!val.empty() && (val.back() == ' ' || val.back() == '\t')) val.pop_back();
 
-            if (key == "content-length") {
+            if (key == "content-type") {
+                content_type = val;
+            } else if (key == "content-length") {
                 try {
                     content_length = std::stoull(val);
                 } catch (...) {
@@ -485,10 +489,29 @@ void HttpServer::handle_client(uintptr_t client_socket) {
         return;
     }
 
-    // 3. Parse OpenAI chat completion request
+    // 3. Parse OpenAI chat completion request (JSON or multipart/form-data)
     ChatCompletionRequest req;
     ApiError parse_err;
-    if (!parse_chat_completion_request(body, req, parse_err)) {
+    bool parse_ok = false;
+
+    if (content_type.find("multipart/form-data") != std::string::npos) {
+        std::string boundary;
+        size_t bpos = content_type.find("boundary=");
+        if (bpos != std::string::npos) {
+            boundary = content_type.substr(bpos + 9);
+            while (!boundary.empty() && (boundary.front() == ' ' || boundary.front() == '\t' || boundary.front() == '"')) {
+                boundary.erase(boundary.begin());
+            }
+            while (!boundary.empty() && (boundary.back() == ' ' || boundary.back() == '\t' || boundary.back() == '"' || boundary.back() == ';')) {
+                boundary.pop_back();
+            }
+        }
+        parse_ok = parse_multipart_chat_completion_request(body, boundary, req, parse_err);
+    } else {
+        parse_ok = parse_chat_completion_request(body, req, parse_err);
+    }
+
+    if (!parse_ok) {
         std::string err_body = parse_err.to_json();
         std::string resp =
             "HTTP/1.1 " + std::to_string(parse_err.status_code) + " Bad Request\r\n"
@@ -499,6 +522,54 @@ void HttpServer::handle_client(uintptr_t client_socket) {
         send_string(sock, resp);
         CLOSE_SOCKET(sock);
         return;
+    }
+
+    // Fail-loud image validation contract: reject requests exceeding max resolution (1024x1024)
+    // or max aspect ratio (4:1) immediately with HTTP 400 Bad Request before allocating GPU memory
+    for (auto& img : req.images) {
+        if (img.width <= 0 || img.height <= 0) {
+            core::ImageDimensions dims;
+            std::string dim_err;
+            if (!core::parse_image_dimensions(img.raw_bytes.data(), img.raw_bytes.size(), dims, &dim_err)) {
+                ApiError err;
+                err.status_code = 400;
+                err.type = "invalid_request_error";
+                err.code = "invalid_image_format";
+                err.message = "Failed to parse image headers: " + dim_err;
+                std::string err_body = err.to_json();
+                std::string resp =
+                    "HTTP/1.1 400 Bad Request\r\n"
+                    "Content-Type: application/json\r\n"
+                    "Access-Control-Allow-Origin: *\r\n"
+                    "Content-Length: " + std::to_string(err_body.size()) + "\r\n"
+                    "Connection: close\r\n\r\n" + err_body;
+                send_string(sock, resp);
+                CLOSE_SOCKET(sock);
+                return;
+            }
+            img.width = dims.width;
+            img.height = dims.height;
+            img.channels = dims.channels;
+        }
+
+        std::string val_err;
+        if (!core::validate_image_dimensions(img.width, img.height, 1024, 4.0f, &val_err)) {
+            ApiError err;
+            err.status_code = 400;
+            err.type = "invalid_request_error";
+            err.code = (img.width > 1024 || img.height > 1024) ? "image_resolution_exceeded" : "image_aspect_ratio_exceeded";
+            err.message = val_err;
+            std::string err_body = err.to_json();
+            std::string resp =
+                "HTTP/1.1 400 Bad Request\r\n"
+                "Content-Type: application/json\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
+                "Content-Length: " + std::to_string(err_body.size()) + "\r\n"
+                "Connection: close\r\n\r\n" + err_body;
+            send_string(sock, resp);
+            CLOSE_SOCKET(sock);
+            return;
+        }
     }
 
     // Validate sampling parameters (only greedy argmax: temperature == 0.0, top_p == 1.0 is currently supported)
