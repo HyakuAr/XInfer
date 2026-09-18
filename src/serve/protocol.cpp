@@ -498,10 +498,33 @@ bool parse_chat_completion_request(std::string_view json_str,
     }
 
     out_req.model = root.get_string("model", "qwen3.8-27b");
-    out_req.max_tokens = static_cast<int>(root.get_int("max_tokens", 256));
     out_req.temperature = static_cast<float>(root.get_double("temperature", 0.0));
     out_req.top_p = static_cast<float>(root.get_double("top_p", 1.0));
     out_req.stream = root.get_bool("stream", false);
+
+    const auto* mt = root.find("max_tokens");
+    if (mt) {
+        if (mt->type != JsonValue::Type::Number || static_cast<int64_t>(mt->num_val) <= 0) {
+            out_err.status_code = 400;
+            out_err.type = "invalid_request_error";
+            out_err.param = "max_tokens";
+            out_err.code = "invalid_parameter";
+            out_err.message = "Invalid 'max_tokens': must be greater than 0";
+            return false;
+        }
+        out_req.max_tokens = static_cast<int>(mt->num_val);
+    } else {
+        out_req.max_tokens = 256;
+    }
+
+    if (out_req.max_tokens <= 0) {
+        out_err.status_code = 400;
+        out_err.type = "invalid_request_error";
+        out_err.param = "max_tokens";
+        out_err.code = "invalid_parameter";
+        out_err.message = "Invalid 'max_tokens': must be greater than 0";
+        return false;
+    }
 
     const auto* msgs = root.find("messages");
     if (!msgs || msgs->type != JsonValue::Type::Array || msgs->arr_val.empty()) {

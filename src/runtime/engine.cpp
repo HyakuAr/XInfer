@@ -218,6 +218,12 @@ public:
     }
 
     bool validate_tokens(size_t prompt_tokens, int max_new_tokens, std::string* error_msg = nullptr) const {
+        if (max_new_tokens <= 0) {
+            if (error_msg) {
+                *error_msg = "Invalid max_new_tokens: must be greater than 0";
+            }
+            return false;
+        }
         size_t limit = max_seq_len();
         if (prompt_tokens > limit) {
             if (error_msg) {
@@ -227,11 +233,11 @@ public:
             }
             return false;
         }
-        if (prompt_tokens + static_cast<size_t>(std::max(0, max_new_tokens)) > limit) {
+        if (prompt_tokens + static_cast<size_t>(max_new_tokens) > limit) {
             if (error_msg) {
                 *error_msg = "This model's maximum context length is " + std::to_string(limit) +
                              " tokens. However, you requested " +
-                             std::to_string(prompt_tokens + static_cast<size_t>(std::max(0, max_new_tokens))) +
+                             std::to_string(prompt_tokens + static_cast<size_t>(max_new_tokens)) +
                              " tokens (" + std::to_string(prompt_tokens) + " in the messages, " +
                              std::to_string(max_new_tokens) + " in the completion). Please reduce the length of the messages or completion.";
             }
@@ -250,6 +256,14 @@ public:
                 result.success = false;
                 result.error_code = "model_not_loaded";
                 result.error_msg = "Model is not loaded";
+                return result;
+            }
+
+            if (gen_config.max_new_tokens <= 0) {
+                std::cerr << "[xinfer::Engine] Error: Invalid max_new_tokens (" << gen_config.max_new_tokens << " <= 0)" << std::endl;
+                result.success = false;
+                result.error_code = "invalid_parameter";
+                result.error_msg = "Invalid max_new_tokens: must be greater than 0";
                 return result;
             }
 

@@ -1,7 +1,35 @@
 #include "serve/protocol.h"
+#include "serve/server.h"
+#include "xinfer/engine.h"
 #include <iostream>
 #include <cassert>
 #include <cmath>
+#include <thread>
+#include <chrono>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+using test_socket_t = SOCKET;
+#define TEST_CLOSE_SOCKET(s) closesocket(s)
+#define TEST_IS_VALID(s) ((s) != INVALID_SOCKET)
+#else
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+using test_socket_t = int;
+#define TEST_CLOSE_SOCKET(s) close(s)
+#define TEST_IS_VALID(s) ((s) >= 0)
+#endif
 
 using namespace xinfer::serve;
 
@@ -95,10 +123,27 @@ void test_parse_invalid_requests() {
     assert(!parse_chat_completion_request("{\"messages\": [{\"content\": \"test\"}]}", req, err));
     assert(err.code == "missing_role");
 
+    // 6. max_tokens <= 0 or invalid
+    assert(!parse_chat_completion_request("{\"messages\": [{\"role\": \"user\", \"content\": \"hi\"}], \"max_tokens\": 0}", req, err));
+    assert(err.status_code == 400);
+    assert(err.code == "invalid_parameter");
+    assert(err.param == "max_tokens");
+
+    assert(!parse_chat_completion_request("{\"messages\": [{\"role\": \"user\", \"content\": \"hi\"}], \"max_tokens\": -5}", req, err));
+    assert(err.status_code == 400);
+    assert(err.code == "invalid_parameter");
+    assert(err.param == "max_tokens");
+
+    assert(!parse_chat_completion_request("{\"messages\": [{\"role\": \"user\", \"content\": \"hi\"}], \"max_tokens\": \"not_a_number\"}", req, err));
+    assert(err.status_code == 400);
+    assert(err.code == "invalid_parameter");
+    assert(err.param == "max_tokens");
+
     // Verify error JSON serialization
     std::string err_json = err.to_json();
     assert(err_json.find("\"error\":{") != std::string::npos);
-    assert(err_json.find("\"code\":\"missing_role\"") != std::string::npos);
+    assert(err_json.find("\"code\":\"invalid_parameter\"") != std::string::npos);
+    assert(err_json.find("\"param\":\"max_tokens\"") != std::string::npos);
 
     std::cout << "  -> PASSED: All invalid request schemas rejected with HTTP 400 and OpenAI error format." << std::endl;
 }
@@ -341,6 +386,123 @@ void test_reasoning_content_serialization() {
     std::cout << "  -> PASSED: reasoning_content correctly serialized in non-streaming and streaming schemas." << std::endl;
 }
 
+test_socket_t connect_to_server(int port) {
+    test_socket_t s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (!TEST_IS_VALID(s)) return s;
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(static_cast<uint16_t>(port));
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    if (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        TEST_CLOSE_SOCKET(s);
+        return static_cast<test_socket_t>(INVALID_SOCKET);
+    }
+    return s;
+}
+
+std::string send_and_recv_response(test_socket_t s, const std::string& req) {
+    send(s, req.data(), static_cast<int>(req.size()), 0);
+    std::string resp;
+    char buf[1024];
+    while (true) {
+        int r = recv(s, buf, sizeof(buf), 0);
+        if (r <= 0) break;
+        resp.append(buf, r);
+    }
+    TEST_CLOSE_SOCKET(s);
+    return resp;
+}
+
+void test_server_request_hardening() {
+    std::cout << "[Test 10/10] Server request hardening (chunked transfer rejection, max_tokens <= 0, recv timeout)..." << std::endl;
+
+    // 1. Validate Engine::validate_tokens with max_new_tokens <= 0
+    xinfer::Engine engine;
+    std::string v_err;
+    assert(!engine.validate_tokens(10, 0, &v_err));
+    assert(v_err.find("Invalid max_new_tokens") != std::string::npos);
+    assert(!engine.validate_tokens(10, -1, &v_err));
+    assert(v_err.find("Invalid max_new_tokens") != std::string::npos);
+
+    // 2. Validate Engine::generate with max_new_tokens <= 0
+    xinfer::GenerationConfig bad_cfg;
+    bad_cfg.max_new_tokens = 0;
+    auto bad_gen = engine.generate("hello", bad_cfg);
+    assert(!bad_gen.success);
+
+    // 3. Start HttpServer on ephemeral port with 2-second timeout
+    ServerConfig cfg;
+    cfg.host = "127.0.0.1";
+    cfg.port = 0; // OS assigns free ephemeral port
+    cfg.recv_timeout_sec = 2;
+    HttpServer server(engine);
+    std::string start_err;
+    bool started = server.start(cfg, &start_err);
+    assert(started);
+    int port = server.port();
+    assert(port > 0);
+
+    // 4. Test Transfer-Encoding: chunked rejection
+    {
+        test_socket_t s = connect_to_server(port);
+        assert(TEST_IS_VALID(s));
+        std::string req =
+            "POST /v1/chat/completions HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Transfer-Encoding: chunked\r\n"
+            "Content-Type: application/json\r\n\r\n"
+            "1e\r\n"
+            "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}\r\n"
+            "0\r\n\r\n";
+        std::string resp = send_and_recv_response(s, req);
+        assert(resp.find("HTTP/1.1 400 Bad Request") != std::string::npos);
+        assert(resp.find("\"code\":\"unsupported_parameter\"") != std::string::npos);
+        assert(resp.find("\"param\":\"Transfer-Encoding\"") != std::string::npos);
+        assert(resp.find("Chunked transfer encoding is not supported") != std::string::npos);
+    }
+
+    // 5. Test max_tokens: 0 rejection by server
+    {
+        test_socket_t s = connect_to_server(port);
+        assert(TEST_IS_VALID(s));
+        std::string body = "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":0}";
+        std::string req =
+            "POST /v1/chat/completions HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body;
+        std::string resp = send_and_recv_response(s, req);
+        assert(resp.find("HTTP/1.1 400 Bad Request") != std::string::npos);
+        assert(resp.find("\"code\":\"invalid_parameter\"") != std::string::npos);
+        assert(resp.find("\"param\":\"max_tokens\"") != std::string::npos);
+    }
+
+    // 6. Test partial body with timeout handling
+    {
+        test_socket_t s = connect_to_server(port);
+        assert(TEST_IS_VALID(s));
+        std::string req =
+            "POST /v1/chat/completions HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Content-Type: application/json\r\n"
+            "Content-Length: 200\r\n\r\n"
+            "{\"messages\":[";
+        send(s, req.data(), static_cast<int>(req.size()), 0);
+        std::string resp;
+        char buf[1024];
+        while (true) {
+            int r = recv(s, buf, sizeof(buf), 0);
+            if (r <= 0) break;
+            resp.append(buf, r);
+        }
+        TEST_CLOSE_SOCKET(s);
+        assert(resp.find("408 Request Timeout") != std::string::npos || resp.empty());
+    }
+
+    server.stop();
+    std::cout << "  -> PASSED: Server request hardening verified (chunked rejection, max_tokens <= 0 rejection, and recv timeout)." << std::endl;
+}
+
 int main() {
     std::cout << "==========================================================" << std::endl;
     std::cout << " xinfer Milestone 9 OpenAI Serving Protocol & Schema Test" << std::endl;
@@ -355,6 +517,7 @@ int main() {
     test_utf16_surrogate_pairs();
     test_top_p_parsing();
     test_reasoning_content_serialization();
+    test_server_request_hardening();
 
     std::cout << "==========================================================" << std::endl;
     std::cout << " ALL MILESTONE 9 SCHEMA TESTS PASSED!" << std::endl;

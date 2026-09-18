@@ -22,6 +22,7 @@ struct ServerConfig {
     std::string model_id{"qwen3.8-27b"};
     size_t      num_workers{8};                     // Concurrency contract: 1-8 active requests (default 8)
     size_t      max_queued_requests{32};            // Bounded request backlog before returning 503
+    int         recv_timeout_sec{15};               // Socket recv timeout in seconds (default 15s)
 };
 
 class HttpServer {
@@ -40,6 +41,9 @@ public:
 
     // Query if server is active and listening
     bool is_running() const noexcept { return is_running_.load(); }
+
+    // Query actual listening port (useful if port 0 was passed for ephemeral assignment)
+    int port() const noexcept { return config_.port; }
 
     // Block caller until server stops (e.g. on SIGINT)
     void wait();

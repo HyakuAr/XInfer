@@ -9,6 +9,12 @@
 #include <exception>
 
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #endif
 
@@ -34,6 +40,7 @@ void print_usage(const char* prog) {
               << "  --chunk-size <int>          Chunk size for chunked prefill (default: 512)\n"
               << "  --max-seq-len <int>         Maximum context length for KV cache (default: 8192)\n"
               << "  --workers <int>             Number of worker threads (1-8, default: 8)\n"
+              << "  --recv-timeout <int>        Socket receive timeout in seconds (default: 15)\n"
               << "  --skip-checksum             Skip whole-file CRC-64 checksum validation\n"
               << "  --help, -h                  Show this help message\n"
               << std::endl;
@@ -53,6 +60,7 @@ int main(int argc, char** argv) {
     int chunk_size = 512;
     int max_seq_len = 8192;
     int workers = 8;
+    int recv_timeout = 15;
     bool validate_checksum = true;
 
     for (int i = 1; i < argc; ++i) {
@@ -75,6 +83,8 @@ int main(int argc, char** argv) {
             max_seq_len = std::stoi(argv[++i]);
         } else if (arg == "--workers" && i + 1 < argc) {
             workers = std::clamp(std::stoi(argv[++i]), 1, 8);
+        } else if (arg == "--recv-timeout" && i + 1 < argc) {
+            recv_timeout = std::max(1, std::stoi(argv[++i]));
         } else if (arg == "--skip-checksum" || arg == "--no-checksum") {
             validate_checksum = false;
         } else if (arg == "--help" || arg == "-h") {
@@ -132,6 +142,7 @@ int main(int argc, char** argv) {
     srv_cfg.port = port;
     srv_cfg.model_id = model_id;
     srv_cfg.num_workers = static_cast<size_t>(workers);
+    srv_cfg.recv_timeout_sec = recv_timeout;
 
     xinfer::serve::HttpServer server(engine);
     try {

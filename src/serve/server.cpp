@@ -61,6 +61,20 @@ std::string to_lower_copy(std::string s) {
     return s;
 }
 
+bool set_socket_recv_timeout(socket_t sock, int timeout_seconds) {
+    if (timeout_seconds <= 0) return true;
+#ifdef _WIN32
+    DWORD timeout_ms = static_cast<DWORD>(timeout_seconds) * 1000;
+    int res = setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
+#else
+    struct timeval tv{};
+    tv.tv_sec = timeout_seconds;
+    tv.tv_usec = 0;
+    int res = setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
+    return res == 0;
+}
+
 } // anonymous namespace
 
 HttpServer::HttpServer(Engine& engine) : engine_(engine) {
@@ -122,6 +136,18 @@ bool HttpServer::start(const ServerConfig& config, std::string* error_msg) {
         CLOSE_SOCKET(listen_fd);
         if (error_msg) *error_msg = "Failed to listen on socket";
         return false;
+    }
+
+    if (config_.port == 0) {
+        sockaddr_in bound_addr{};
+#ifdef _WIN32
+        int bound_len = sizeof(bound_addr);
+#else
+        socklen_t bound_len = sizeof(bound_addr);
+#endif
+        if (getsockname(listen_fd, reinterpret_cast<sockaddr*>(&bound_addr), &bound_len) == 0) {
+            config_.port = ntohs(bound_addr.sin_port);
+        }
     }
 
     server_socket_ = static_cast<uintptr_t>(listen_fd);
@@ -206,6 +232,9 @@ void HttpServer::accept_loop() {
             continue;
         }
 
+        // Set receive timeout on accepted client socket
+        set_socket_recv_timeout(client_fd, config_.recv_timeout_sec);
+
         // Bounded queue: enqueue or reject with 503 if backlog is full
         bool enqueued = false;
         {
@@ -269,6 +298,7 @@ void HttpServer::worker_loop() {
 
 void HttpServer::handle_client(uintptr_t client_socket) {
     socket_t sock = static_cast<socket_t>(client_socket);
+    set_socket_recv_timeout(sock, config_.recv_timeout_sec);
 
     std::vector<char> buffer(4096);
     std::string raw_request;
@@ -303,6 +333,7 @@ void HttpServer::handle_client(uintptr_t client_socket) {
     std::string line;
     std::getline(h_stream, line); // consume remainder of first line
     size_t content_length = 0;
+    bool is_chunked = false;
 
     while (std::getline(h_stream, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -310,13 +341,19 @@ void HttpServer::handle_client(uintptr_t client_socket) {
         if (colon != std::string::npos) {
             std::string key = to_lower_copy(line.substr(0, colon));
             std::string val = line.substr(colon + 1);
-            while (!val.empty() && val.front() == ' ') val.erase(val.begin());
+            while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.erase(val.begin());
+            while (!val.empty() && (val.back() == ' ' || val.back() == '\t')) val.pop_back();
 
             if (key == "content-length") {
                 try {
                     content_length = std::stoull(val);
                 } catch (...) {
                     content_length = 0;
+                }
+            } else if (key == "transfer-encoding") {
+                std::string val_lower = to_lower_copy(val);
+                if (val_lower.find("chunked") != std::string::npos) {
+                    is_chunked = true;
                 }
             }
         }
@@ -386,6 +423,26 @@ void HttpServer::handle_client(uintptr_t client_socket) {
         return;
     }
 
+    // Detect and reject unsupported Transfer-Encoding: chunked
+    if (is_chunked) {
+        ApiError err;
+        err.status_code = 400;
+        err.type = "invalid_request_error";
+        err.param = "Transfer-Encoding";
+        err.code = "unsupported_parameter";
+        err.message = "Chunked transfer encoding is not supported. Please provide a Content-Length header.";
+        std::string err_body = err.to_json();
+        std::string resp =
+            "HTTP/1.1 400 Bad Request\r\n"
+            "Content-Type: application/json\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Content-Length: " + std::to_string(err_body.size()) + "\r\n"
+            "Connection: close\r\n\r\n" + err_body;
+        send_string(sock, resp);
+        CLOSE_SOCKET(sock);
+        return;
+    }
+
     // 2. Read remainder of POST body
     if (content_length > config_.max_request_size) {
         ApiError err;
@@ -410,6 +467,24 @@ void HttpServer::handle_client(uintptr_t client_socket) {
         body.append(buffer.data(), bytes);
     }
 
+    if (body.size() < content_length) {
+        ApiError err;
+        err.status_code = 408;
+        err.type = "invalid_request_error";
+        err.code = "request_timeout";
+        err.message = "Client timed out or disconnected before complete request body was received.";
+        std::string err_body = err.to_json();
+        std::string resp =
+            "HTTP/1.1 408 Request Timeout\r\n"
+            "Content-Type: application/json\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Content-Length: " + std::to_string(err_body.size()) + "\r\n"
+            "Connection: close\r\n\r\n" + err_body;
+        send_string(sock, resp);
+        CLOSE_SOCKET(sock);
+        return;
+    }
+
     // 3. Parse OpenAI chat completion request
     ChatCompletionRequest req;
     ApiError parse_err;
@@ -427,6 +502,25 @@ void HttpServer::handle_client(uintptr_t client_socket) {
     }
 
     // Validate sampling parameters (only greedy argmax: temperature == 0.0, top_p == 1.0 is currently supported)
+    if (req.max_tokens <= 0) {
+        ApiError err;
+        err.status_code = 400;
+        err.type = "invalid_request_error";
+        err.param = "max_tokens";
+        err.code = "invalid_parameter";
+        err.message = "Invalid 'max_tokens': must be greater than 0";
+        std::string err_body = err.to_json();
+        std::string resp =
+            "HTTP/1.1 400 Bad Request\r\n"
+            "Content-Type: application/json\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Content-Length: " + std::to_string(err_body.size()) + "\r\n"
+            "Connection: close\r\n\r\n" + err_body;
+        send_string(sock, resp);
+        CLOSE_SOCKET(sock);
+        return;
+    }
+
     if (req.temperature < 0.0f) {
         ApiError err;
         err.status_code = 400;
