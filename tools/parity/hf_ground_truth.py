@@ -253,7 +253,13 @@ def run_ground_truth(
 
 def main():
     parser = argparse.ArgumentParser(description="Extract HF ground-truth logits for Qwen3.8-27B")
-    parser.add_argument("--checkpoint-dir", type=str, default=r"H:\Models\Qwen3.8-27B", help="Path to HF checkpoint")
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default=os.environ.get("XINFER_CHECKPOINT_DIR"),
+        required=os.environ.get("XINFER_CHECKPOINT_DIR") is None,
+        help="Path to HF checkpoint directory (can also be set via XINFER_CHECKPOINT_DIR env var)",
+    )
     parser.add_argument("--prompt", type=str, default="The sky is", help="Prompt text")
     parser.add_argument("--output-json", type=str, default=r"tools\parity\hf_ground_truth.json", help="Output JSON path")
     parser.add_argument("--top-k", type=int, default=10, help="Number of top predictions to record")

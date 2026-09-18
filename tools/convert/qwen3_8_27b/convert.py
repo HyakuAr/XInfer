@@ -201,7 +201,13 @@ def should_quantize_tensor(name: str, tensor: torch.Tensor, group_size: int) -> 
 
 def main():
     parser = argparse.ArgumentParser(description="Convert Qwen3.8-27B BF16 checkpoint to .xinfer INT4 format")
-    parser.add_argument("--checkpoint-dir", type=str, default=r"H:\Models\Qwen3.8-27B", help="Path to HF checkpoint")
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default=os.environ.get("XINFER_CHECKPOINT_DIR"),
+        required=os.environ.get("XINFER_CHECKPOINT_DIR") is None,
+        help="Path to HF checkpoint directory (can also be set via XINFER_CHECKPOINT_DIR env var)",
+    )
     parser.add_argument("--output-path", type=str, default=r"out\qwen3_8_27b.xinfer", help="Output .xinfer file path")
     parser.add_argument("--group-size", type=int, default=128, help="INT4 group size")
     parser.add_argument("--parity-samples", type=int, default=16, help="Number of tensors to verify for numerical parity")

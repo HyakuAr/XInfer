@@ -189,10 +189,17 @@ std::unique_ptr<LoadedModel> LoadedModel::load_from_artifact(
     auto validate_optional_int_prop = [&](const std::string& key, int64_t expected_val) -> bool {
         auto it = meta.properties.find(key);
         if (it != meta.properties.end() && !it->second.empty()) {
-            int64_t actual_val = std::stoll(it->second);
-            if (actual_val != expected_val) {
-                std::string msg = "Artifact metadata property mismatch for '" + key + "': expected " +
-                                  std::to_string(expected_val) + ", got " + std::to_string(actual_val);
+            try {
+                int64_t actual_val = std::stoll(it->second);
+                if (actual_val != expected_val) {
+                    std::string msg = "Artifact metadata property mismatch for '" + key + "': expected " +
+                                      std::to_string(expected_val) + ", got " + std::to_string(actual_val);
+                    std::cerr << "[Error] " << msg << std::endl;
+                    if (error_msg) *error_msg = msg;
+                    return false;
+                }
+            } catch (const std::exception& e) {
+                std::string msg = "Artifact metadata property '" + key + "' is malformed: " + e.what();
                 std::cerr << "[Error] " << msg << std::endl;
                 if (error_msg) *error_msg = msg;
                 return false;

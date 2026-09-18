@@ -1,4 +1,5 @@
 #include "arena.h"
+#include <cassert>
 #include <new>
 #include <utility>
 
@@ -114,7 +115,11 @@ void* DeviceArena::allocate_persistent(size_t bytes, size_t alignment) {
 }
 
 void* DeviceArena::persistent_buffer(size_t bytes, size_t alignment) {
-    if (!persistent_buffer_ && bytes > 0) {
+    if (!persistent_buffer_) {
+        assert(bytes > 0 && "DeviceArena::persistent_buffer: initial allocation must specify non-zero bytes");
+        if (bytes == 0) {
+            throw std::invalid_argument("DeviceArena::persistent_buffer: initial allocation must specify non-zero bytes");
+        }
         persistent_buffer_ = allocate_persistent(bytes, alignment);
     }
     return persistent_buffer_;

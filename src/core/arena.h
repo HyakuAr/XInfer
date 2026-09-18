@@ -37,6 +37,7 @@ public:
 
     // Get or allocate a dedicated persistent buffer (e.g. for fallback logits) outside the bump arena.
     // Preserves address stability across decode steps and survives reset().
+    // Initial call must specify non-zero bytes to allocate; subsequent calls may pass bytes = 0.
     void* persistent_buffer(size_t bytes = 0, size_t alignment = 0);
     const void* persistent_buffer() const noexcept { return persistent_buffer_; }
 
