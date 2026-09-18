@@ -190,22 +190,24 @@ bool KVCache::allocate() {
     size_t conv_bytes_per_layer = conv_elements_per_layer * sizeof(float);
 
     recurrent_storage_bytes_ = config_.num_linear_layers * (s_bytes_per_layer + conv_bytes_per_layer);
-    d_raw_recurrent_storage_ = sycl::malloc_device(recurrent_storage_bytes_, q);
-    if (!d_raw_recurrent_storage_) {
-        std::cerr << "[xinfer::KVCache] Failed to allocate " << (recurrent_storage_bytes_ / (1024 * 1024))
-                  << " MB for linear-attention recurrent state on GPU.\n";
-        return false;
-    }
+    if (recurrent_storage_bytes_ > 0) {
+        d_raw_recurrent_storage_ = sycl::malloc_device(recurrent_storage_bytes_, q);
+        if (!d_raw_recurrent_storage_) {
+            std::cerr << "[xinfer::KVCache] Failed to allocate " << (recurrent_storage_bytes_ / (1024 * 1024))
+                      << " MB for linear-attention recurrent state on GPU.\n";
+            return false;
+        }
 
-    linear_states_.resize(config_.num_linear_layers);
-    conv_states_.resize(config_.num_linear_layers);
+        linear_states_.resize(config_.num_linear_layers);
+        conv_states_.resize(config_.num_linear_layers);
 
-    uint8_t* rec_ptr = static_cast<uint8_t*>(d_raw_recurrent_storage_);
-    for (size_t l = 0; l < config_.num_linear_layers; ++l) {
-        linear_states_[l] = reinterpret_cast<float*>(rec_ptr);
-        rec_ptr += s_bytes_per_layer;
-        conv_states_[l] = reinterpret_cast<float*>(rec_ptr);
-        rec_ptr += conv_bytes_per_layer;
+        uint8_t* rec_ptr = static_cast<uint8_t*>(d_raw_recurrent_storage_);
+        for (size_t l = 0; l < config_.num_linear_layers; ++l) {
+            linear_states_[l] = reinterpret_cast<float*>(rec_ptr);
+            rec_ptr += s_bytes_per_layer;
+            conv_states_[l] = reinterpret_cast<float*>(rec_ptr);
+            rec_ptr += conv_bytes_per_layer;
+        }
     }
 
     clear();

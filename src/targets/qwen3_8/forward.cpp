@@ -553,6 +553,90 @@ DraftDecodeResult draft_decode_loop(std::shared_ptr<core::DeviceContext> ctx,
     return result;
 }
 
+void forward_verify(std::shared_ptr<core::DeviceContext> ctx,
+                    core::DeviceArena& arena,
+                    const qwen3_8_27b::LoadedModel& model,
+                    core::KVCache& kv_cache,
+                    const int64_t* draft_tokens,
+                    int64_t num_draft_tokens,
+                    int64_t prefix_len,
+                    float* out_logits) {
+    if (num_draft_tokens <= 0 || !draft_tokens || !out_logits) return;
+
+    if (prefix_len < 0 || prefix_len + num_draft_tokens > static_cast<int64_t>(kv_cache.max_seq_len())) {
+        std::string err = "context_length_exceeded: forward_verify bounds exceeded: prefix_len=" +
+                          std::to_string(prefix_len) + " + draft=" + std::to_string(num_draft_tokens) +
+                          " > max=" + std::to_string(kv_cache.max_seq_len());
+        std::cerr << "[xinfer::qwen3_8] Error: " << err << std::endl;
+        throw context_length_exceeded(err);
+    }
+
+    const auto& cfg = model.config();
+    for (int64_t i = 0; i < num_draft_tokens; ++i) {
+        if (draft_tokens[i] < 0 || draft_tokens[i] >= cfg.vocab_size) {
+            throw std::out_of_range("forward_verify: draft token at index " + std::to_string(i) +
+                                    " (" + std::to_string(draft_tokens[i]) + ") out of vocab range");
+        }
+    }
+
+    sycl::queue& q = ctx->queue();
+    const int64_t hidden_size = cfg.hidden_size;
+    const int64_t intermediate_size = cfg.intermediate_size;
+
+    // Allocate device buffers for the M = num_draft_tokens batch
+    int64_t* d_token_ids = static_cast<int64_t*>(arena.allocate(num_draft_tokens * sizeof(int64_t)));
+    ctx->copy_host_to_device(d_token_ids, draft_tokens, num_draft_tokens * sizeof(int64_t), true);
+
+    int64_t* d_positions = static_cast<int64_t*>(arena.allocate(num_draft_tokens * sizeof(int64_t)));
+    std::vector<int64_t> host_pos(num_draft_tokens);
+    for (int64_t i = 0; i < num_draft_tokens; ++i) {
+        host_pos[i] = prefix_len + i;
+    }
+    ctx->copy_host_to_device(d_positions, host_pos.data(), num_draft_tokens * sizeof(int64_t), true);
+
+    LayerActivationBuffers bufs;
+    bufs.act_x        = static_cast<sycl::half*>(arena.allocate(num_draft_tokens * hidden_size * sizeof(sycl::half)));
+    bufs.act_normed   = static_cast<sycl::half*>(arena.allocate(num_draft_tokens * hidden_size * sizeof(sycl::half)));
+    bufs.act_proj_out = static_cast<sycl::half*>(arena.allocate(num_draft_tokens * hidden_size * sizeof(sycl::half)));
+    bufs.act_mlp_gate = static_cast<sycl::half*>(arena.allocate(num_draft_tokens * intermediate_size * sizeof(sycl::half)));
+
+    bufs.act_q_gate   = static_cast<sycl::half*>(arena.allocate(num_draft_tokens * cfg.full_q_gate_dim() * sizeof(sycl::half)));
+    bufs.act_q        = static_cast<sycl::half*>(arena.allocate(num_draft_tokens * cfg.full_q_dim() * sizeof(sycl::half)));
+    bufs.act_k        = static_cast<sycl::half*>(arena.allocate(num_draft_tokens * cfg.full_k_dim() * sizeof(sycl::half)));
+    bufs.act_v        = static_cast<sycl::half*>(arena.allocate(num_draft_tokens * cfg.full_v_dim() * sizeof(sycl::half)));
+    bufs.act_attn_out = static_cast<sycl::half*>(arena.allocate(num_draft_tokens * cfg.full_out_dim() * sizeof(sycl::half)));
+
+    bufs.act_qkv_raw   = static_cast<sycl::half*>(arena.allocate(num_draft_tokens * cfg.linear_conv_channels * sizeof(sycl::half)));
+    bufs.act_qkv_conv  = static_cast<sycl::half*>(arena.allocate(num_draft_tokens * cfg.linear_conv_channels * sizeof(sycl::half)));
+    bufs.act_z         = static_cast<sycl::half*>(arena.allocate(num_draft_tokens * cfg.linear_z_dim * sizeof(sycl::half)));
+    bufs.act_b         = static_cast<sycl::half*>(arena.allocate(num_draft_tokens * cfg.linear_b_dim * sizeof(sycl::half)));
+    bufs.act_a         = static_cast<sycl::half*>(arena.allocate(num_draft_tokens * cfg.linear_a_dim * sizeof(sycl::half)));
+    bufs.act_delta_out = static_cast<sycl::half*>(arena.allocate(num_draft_tokens * cfg.linear_z_dim * sizeof(sycl::half)));
+
+    // 1. Initial embedding lookup for all N draft tokens
+    embed_tokens_lookup(q, bufs.act_x, model.d_embed_tokens(), d_token_ids, num_draft_tokens, hidden_size, cfg.vocab_size);
+
+    // 2. Forward layers with causal masking across draft window (attending to prefix + prior draft tokens)
+    const auto& layers = model.layers();
+    size_t full_idx = 0;
+    size_t linear_idx = 0;
+
+    for (size_t l = 0; l < layers.size(); ++l) {
+        forward_layer(q, cfg, layers[l], kv_cache, full_idx, linear_idx, bufs,
+                      num_draft_tokens, d_positions, prefix_len, nullptr, false);
+    }
+
+    // 3. Batched LM head projection for all N draft tokens: [num_draft_tokens, vocab_size]
+    ops::rmsnorm(q, bufs.act_normed, bufs.act_x, model.d_final_norm(), num_draft_tokens, hidden_size);
+
+    const auto& lm_head = model.lm_head();
+    ops::linear_int4(q, out_logits, bufs.act_normed,
+                     static_cast<const uint8_t*>(lm_head.d_weights_int4),
+                     static_cast<const sycl::half*>(lm_head.d_scales),
+                     nullptr, num_draft_tokens, cfg.vocab_size, hidden_size);
+    q.wait();
+}
+
 int64_t forward_next_token(std::shared_ptr<core::DeviceContext> ctx,
                            core::DeviceArena& arena,
                            const qwen3_8_27b::LoadedModel& model,

@@ -132,6 +132,18 @@ DraftDecodeResult draft_decode_loop(std::shared_ptr<core::DeviceContext> ctx,
                                    int64_t current_token_id,
                                    size_t num_draft_tokens);
 
+// Batched speculative verification forward pass for N draft tokens (M = N).
+// Computes verified logits for each of the N draft tokens into out_logits [N, vocab_size].
+// prefix_len is the sequence length in kv_cache before the draft tokens.
+void forward_verify(std::shared_ptr<core::DeviceContext> ctx,
+                    core::DeviceArena& arena,
+                    const qwen3_8_27b::LoadedModel& model,
+                    core::KVCache& kv_cache,
+                    const int64_t* draft_tokens,
+                    int64_t num_draft_tokens,
+                    int64_t prefix_len,
+                    float* out_logits);
+
 // Legacy forward pass without persistent cache (M5 baseline)
 int64_t forward_next_token(std::shared_ptr<core::DeviceContext> ctx,
                            core::DeviceArena& arena,

@@ -1083,4 +1083,74 @@ sycl::event sdpa_causal_cached_int8_dynamic(sycl::queue& q,
                                                 d_start_pos, num_q_tokens, num_q_heads, num_kv_heads, head_dim, scale, max_seq_len);
 }
 
+void sdpa_causal_verify(sycl::queue& q,
+                        float* out,
+                        const float* Q,
+                        const sycl::half* k_cache,
+                        const sycl::half* v_cache,
+                        int64_t prefix_len,
+                        int64_t num_draft_tokens,
+                        int64_t num_q_heads,
+                        int64_t num_kv_heads,
+                        int64_t head_dim,
+                        float scale,
+                        int64_t max_seq_len) {
+    sdpa_causal_cached_impl(q, out, Q, k_cache, v_cache, prefix_len, num_draft_tokens, num_q_heads, num_kv_heads, head_dim, scale, max_seq_len);
+}
+
+void sdpa_causal_verify(sycl::queue& q,
+                        sycl::half* out,
+                        const sycl::half* Q,
+                        const sycl::half* k_cache,
+                        const sycl::half* v_cache,
+                        int64_t prefix_len,
+                        int64_t num_draft_tokens,
+                        int64_t num_q_heads,
+                        int64_t num_kv_heads,
+                        int64_t head_dim,
+                        float scale,
+                        int64_t max_seq_len) {
+    sdpa_causal_cached_impl(q, out, Q, k_cache, v_cache, prefix_len, num_draft_tokens, num_q_heads, num_kv_heads, head_dim, scale, max_seq_len);
+}
+
+void sdpa_causal_verify_int8(sycl::queue& q,
+                             float* out,
+                             const float* Q,
+                             const int8_t* k_cache,
+                             const int8_t* v_cache,
+                             const float* k_scale,
+                             const float* v_scale,
+                             const float* k_zero_point,
+                             const float* v_zero_point,
+                             int64_t prefix_len,
+                             int64_t num_draft_tokens,
+                             int64_t num_q_heads,
+                             int64_t num_kv_heads,
+                             int64_t head_dim,
+                             float scale,
+                             int64_t max_seq_len) {
+    sdpa_causal_cached_int8_impl(q, out, Q, k_cache, v_cache, k_scale, v_scale, k_zero_point, v_zero_point,
+                                 prefix_len, num_draft_tokens, num_q_heads, num_kv_heads, head_dim, scale, max_seq_len);
+}
+
+void sdpa_causal_verify_int8(sycl::queue& q,
+                             sycl::half* out,
+                             const sycl::half* Q,
+                             const int8_t* k_cache,
+                             const int8_t* v_cache,
+                             const float* k_scale,
+                             const float* v_scale,
+                             const float* k_zero_point,
+                             const float* v_zero_point,
+                             int64_t prefix_len,
+                             int64_t num_draft_tokens,
+                             int64_t num_q_heads,
+                             int64_t num_kv_heads,
+                             int64_t head_dim,
+                             float scale,
+                             int64_t max_seq_len) {
+    sdpa_causal_cached_int8_impl(q, out, Q, k_cache, v_cache, k_scale, v_scale, k_zero_point, v_zero_point,
+                                 prefix_len, num_draft_tokens, num_q_heads, num_kv_heads, head_dim, scale, max_seq_len);
+}
+
 } // namespace xinfer::ops
