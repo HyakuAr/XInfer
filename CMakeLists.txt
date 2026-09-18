@@ -470,3 +470,19 @@ target_link_libraries(eval_perplexity PRIVATE
 )
 target_compile_options(eval_perplexity PRIVATE -fsycl)
 target_link_options(eval_perplexity PRIVATE -fsycl)
+
+add_executable(test_eval_oracle
+    tests/test_eval_oracle.cpp
+)
+target_include_directories(test_eval_oracle PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(test_eval_oracle PRIVATE
+    xinfer_core
+    xinfer_ops
+)
+target_compile_options(test_eval_oracle PRIVATE -fsycl)
+target_link_options(test_eval_oracle PRIVATE -fsycl)
+
+add_test(NAME EvalOracleTest COMMAND test_eval_oracle)
