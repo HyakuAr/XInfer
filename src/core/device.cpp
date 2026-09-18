@@ -35,6 +35,15 @@ std::shared_ptr<DeviceContext> DeviceContext::create(bool prefer_b60) {
         }
     }
 
+    if (!found) {
+        std::cerr << "[xinfer::DeviceContext] Warning: No "
+                  << (prefer_b60 ? "Intel Arc Pro B60 or " : "")
+                  << "Level-Zero GPU device found. "
+                  << "Falling back to non-preferred, non-Level-Zero device '"
+                  << selected_device.get_info<sycl::info::device::name>()
+                  << "'. Level-Zero backend features will be unavailable." << std::endl;
+    }
+
     return std::make_shared<DeviceContext>(selected_device);
 }
 
@@ -69,7 +78,17 @@ void DeviceContext::query_arch_info() {
         arch_info_.vector_engine_count = arch_info_.xe_core_count * eus;
         arch_info_.hw_threads_per_ve = threads;
         arch_info_.total_hw_threads = arch_info_.vector_engine_count * threads;
+    } catch (const std::exception& e) {
+        std::cerr << "[xinfer::DeviceContext] Warning: Failed to query Xe hardware architecture metrics ("
+                  << e.what() << "). Falling back to default B60 architecture parameters." << std::endl;
+        // Fallback default for Xe2-HPG Battlemage B60 (20 Xe-Cores, 8 VE/core, 8 hw threads/VE)
+        arch_info_.xe_core_count = 20;
+        arch_info_.vector_engine_count = 160;
+        arch_info_.hw_threads_per_ve = 8;
+        arch_info_.total_hw_threads = 1280;
     } catch (...) {
+        std::cerr << "[xinfer::DeviceContext] Warning: Failed to query Xe hardware architecture metrics (unknown error). "
+                  << "Falling back to default B60 architecture parameters." << std::endl;
         // Fallback default for Xe2-HPG Battlemage B60 (20 Xe-Cores, 8 VE/core, 8 hw threads/VE)
         arch_info_.xe_core_count = 20;
         arch_info_.vector_engine_count = 160;
