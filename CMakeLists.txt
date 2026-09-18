@@ -135,6 +135,7 @@ add_library(xinfer_ops STATIC
     src/ops/attention.cpp
     src/ops/sampling.cpp
     src/ops/vit.cpp
+    src/ops/eval.cpp
 )
 target_include_directories(xinfer_ops PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -453,3 +454,35 @@ target_link_libraries(dump_engine_logits PRIVATE
 )
 target_compile_options(dump_engine_logits PRIVATE -fsycl)
 target_link_options(dump_engine_logits PRIVATE -fsycl)
+
+# Evaluation & Perplexity Scoring
+add_executable(eval_perplexity
+    tools/eval/eval_perplexity.cpp
+)
+target_include_directories(eval_perplexity PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(eval_perplexity PRIVATE
+    xinfer_targets
+    xinfer_runtime
+    xinfer_ops
+)
+target_compile_options(eval_perplexity PRIVATE -fsycl)
+target_link_options(eval_perplexity PRIVATE -fsycl)
+
+add_executable(test_eval_oracle
+    tests/test_eval_oracle.cpp
+)
+target_include_directories(test_eval_oracle PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(test_eval_oracle PRIVATE
+    xinfer_core
+    xinfer_ops
+)
+target_compile_options(test_eval_oracle PRIVATE -fsycl)
+target_link_options(test_eval_oracle PRIVATE -fsycl)
+
+add_test(NAME EvalOracleTest COMMAND test_eval_oracle)
