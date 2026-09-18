@@ -114,6 +114,24 @@ int64_t decode_step(std::shared_ptr<core::DeviceContext> ctx,
                     int64_t input_token_id,
                     float* d_logits = nullptr);
 
+class DecodeGraph;
+
+struct DraftDecodeResult {
+    std::vector<int64_t> tokens;
+    bool success{true};
+    std::string error_msg;
+};
+
+// Draft decode loop generating N speculative tokens starting from current_token_id
+// Uses dedicated draft_arena and optional draft_graph for graph isolation.
+DraftDecodeResult draft_decode_loop(std::shared_ptr<core::DeviceContext> ctx,
+                                   core::DeviceArena& draft_arena,
+                                   const qwen3_8_27b::LoadedModel& model,
+                                   core::KVCache& kv_cache,
+                                   DecodeGraph* draft_graph,
+                                   int64_t current_token_id,
+                                   size_t num_draft_tokens);
+
 // Legacy forward pass without persistent cache (M5 baseline)
 int64_t forward_next_token(std::shared_ptr<core::DeviceContext> ctx,
                            core::DeviceArena& arena,

@@ -283,6 +283,36 @@ int main() {
     sycl::free(d_out_int8, q);
     sycl::free(d_q_in, q);
 
+    // Verify KVCache::rollback and bounds check
+    std::cout << "\nTesting KVCache::rollback...\n";
+    cache.set_seq_len(20);
+    if (cache.current_seq_len() != 20) {
+        std::cerr << "FAILED: Expected seq_len 20, got " << cache.current_seq_len() << "\n";
+        return 1;
+    }
+    cache.checkpoint_recurrent_state();
+    cache.rollback(5);
+    if (cache.current_seq_len() != 15) {
+        std::cerr << "FAILED: Expected seq_len 15 after rollback(5), got " << cache.current_seq_len() << "\n";
+        return 1;
+    }
+    std::cout << "[PASS] KVCache::rollback(5) decremented seq_len from 20 to 15\n";
+
+    cache.rollback(15);
+    if (cache.current_seq_len() != 0) {
+        std::cerr << "FAILED: Expected seq_len 0 after rollback(15), got " << cache.current_seq_len() << "\n";
+        return 1;
+    }
+    std::cout << "[PASS] KVCache::rollback(15) decremented seq_len from 15 to 0\n";
+
+    try {
+        cache.rollback(1);
+        std::cerr << "FAILED: KVCache::rollback(1) when seq_len=0 did not throw std::out_of_range\n";
+        return 1;
+    } catch (const std::out_of_range& e) {
+        std::cout << "[PASS] KVCache::rollback(1) correctly threw std::out_of_range: " << e.what() << "\n";
+    }
+
     std::cout << "\nAll KVCache tests PASSED!\n";
     return 0;
 }

@@ -102,6 +102,16 @@ public:
     bool can_advance(size_t delta = 1) const noexcept {
         return current_seq_len_ + delta <= config_.max_seq_len;
     }
+
+    // Roll back sequence length by steps (used in speculative decoding when draft tokens are rejected).
+    // Throws std::out_of_range if steps > current_seq_len.
+    void rollback(size_t steps);
+
+    // Checkpoint/restore linear recurrent state for speculative decoding rollback
+    void checkpoint_recurrent_state();
+    void restore_recurrent_state();
+    bool has_recurrent_checkpoint() const noexcept { return has_recurrent_checkpoint_; }
+
     size_t total_allocated_bytes() const noexcept;
 
 private:
@@ -123,8 +133,10 @@ private:
 
     void* d_raw_kv_storage_{nullptr};
     void* d_raw_recurrent_storage_{nullptr};
+    void* d_raw_recurrent_checkpoint_{nullptr};
     size_t kv_storage_bytes_{0};
     size_t recurrent_storage_bytes_{0};
+    bool has_recurrent_checkpoint_{false};
 };
 
 } // namespace xinfer::core

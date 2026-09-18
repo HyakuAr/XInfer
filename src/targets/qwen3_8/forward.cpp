@@ -1,4 +1,5 @@
 #include "forward.h"
+#include "decode_graph.h"
 #include "linear_attn.h"
 #include "ops/linear.h"
 #include "ops/rmsnorm.h"
@@ -498,6 +499,58 @@ int64_t decode_step(std::shared_ptr<core::DeviceContext> ctx,
     // Greedy argmax
     int64_t next_token = ops::argmax(ctx->queue(), d_logits, cfg.vocab_size);
     return next_token;
+}
+
+DraftDecodeResult draft_decode_loop(std::shared_ptr<core::DeviceContext> ctx,
+                                   core::DeviceArena& draft_arena,
+                                   const qwen3_8_27b::LoadedModel& model,
+                                   core::KVCache& kv_cache,
+                                   DecodeGraph* draft_graph,
+                                   int64_t current_token_id,
+                                   size_t num_draft_tokens) {
+    DraftDecodeResult result;
+    if (num_draft_tokens == 0) {
+        return result;
+    }
+    if (kv_cache.current_seq_len() + num_draft_tokens > kv_cache.max_seq_len()) {
+        result.success = false;
+        result.error_msg = "Draft decode exceeds KV cache max_seq_len: cur=" +
+                           std::to_string(kv_cache.current_seq_len()) + " + draft=" +
+                           std::to_string(num_draft_tokens) + " > max=" +
+                           std::to_string(kv_cache.max_seq_len());
+        return result;
+    }
+
+    int64_t in_tok = current_token_id;
+    result.tokens.reserve(num_draft_tokens);
+
+    for (size_t step = 0; step < num_draft_tokens; ++step) {
+        if (kv_cache.current_seq_len() >= kv_cache.max_seq_len()) {
+            break;
+        }
+
+        int64_t next_tok = -1;
+        if (draft_graph && draft_graph->is_captured()) {
+            next_tok = draft_graph->decode_step(in_tok, kv_cache.current_seq_len());
+            if (next_tok < 0 || !kv_cache.advance(1)) {
+                result.success = false;
+                result.error_msg = "Draft graph decode step failed or KV cache overflow at step " + std::to_string(step);
+                return result;
+            }
+        } else {
+            next_tok = decode_step(ctx, draft_arena, model, kv_cache, in_tok);
+            if (next_tok < 0) {
+                result.success = false;
+                result.error_msg = "Draft eager decode step failed at step " + std::to_string(step);
+                return result;
+            }
+        }
+
+        result.tokens.push_back(next_tok);
+        in_tok = next_tok;
+    }
+
+    return result;
 }
 
 int64_t forward_next_token(std::shared_ptr<core::DeviceContext> ctx,

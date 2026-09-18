@@ -165,8 +165,15 @@ public:
             std::cout << "[xinfer::Engine] Graph capture fallback to standard kernel submission" << std::endl;
         }
 
-            is_loaded_ = true;
-            return true;
+        // 8. Initialize isolated draft execution context (Speculative Decoding / MTP)
+        if (config.enable_speculative) {
+            draft_ctx_.init(ctx_, *model_, *kv_cache_, config.arena_capacity_bytes, config.draft_tokens_num);
+            std::cout << "[xinfer::Engine] Initialized Draft Execution Context (MTP active, N="
+                      << config.draft_tokens_num << ")" << std::endl;
+        }
+
+        is_loaded_ = true;
+        return true;
         } catch (const sycl::exception& e) {
             std::string msg = "SYCL exception during model load: " + std::string(e.what());
             std::cerr << "[xinfer::Engine] " << msg << std::endl;
@@ -535,14 +542,50 @@ public:
         if (arena_) {
             arena_->reset();
         }
+        if (draft_ctx_.is_initialized) {
+            draft_ctx_.reset();
+        }
     }
 
 private:
+    struct DraftContext {
+        std::shared_ptr<core::DeviceContext> ctx;
+        std::unique_ptr<core::DeviceArena> arena;
+        std::unique_ptr<targets::qwen3_8::DecodeGraph> decode_graph;
+        bool is_initialized{false};
+        size_t draft_tokens_num{4};
+
+        bool init(std::shared_ptr<core::DeviceContext> dev_ctx,
+                  const targets::qwen3_8_27b::LoadedModel& model,
+                  core::KVCache& main_kv_cache,
+                  size_t arena_capacity,
+                  size_t draft_n) {
+            ctx = dev_ctx;
+            draft_tokens_num = draft_n;
+            arena = std::make_unique<core::DeviceArena>(ctx, arena_capacity);
+
+            // Draft graph isolation: isolated DecodeGraph instance
+            decode_graph = std::make_unique<targets::qwen3_8::DecodeGraph>(ctx, model, main_kv_cache);
+            if (decode_graph->capture()) {
+                std::cout << "[xinfer::Engine] Captured draft command graph (isolated)" << std::endl;
+            } else {
+                std::cout << "[xinfer::Engine] Draft graph capture fallback to standard kernel submission" << std::endl;
+            }
+            is_initialized = true;
+            return true;
+        }
+
+        void reset() {
+            if (arena) arena->reset();
+        }
+    };
+
     std::shared_ptr<core::DeviceContext> ctx_;
     std::unique_ptr<targets::qwen3_8_27b::LoadedModel> model_;
     std::unique_ptr<core::DeviceArena> arena_;
     std::unique_ptr<core::KVCache> kv_cache_;
     std::unique_ptr<targets::qwen3_8::DecodeGraph> decode_graph_;
+    DraftContext draft_ctx_;
     targets::qwen3_8::QwenTokenizer tokenizer_;
     EngineConfig config_;
     bool is_loaded_{false};

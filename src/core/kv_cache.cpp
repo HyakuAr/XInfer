@@ -20,6 +20,10 @@ KVCache::~KVCache() {
             sycl::free(d_raw_recurrent_storage_, q);
             d_raw_recurrent_storage_ = nullptr;
         }
+        if (d_raw_recurrent_checkpoint_) {
+            sycl::free(d_raw_recurrent_checkpoint_, q);
+            d_raw_recurrent_checkpoint_ = nullptr;
+        }
     }
 }
 
@@ -39,10 +43,14 @@ KVCache::KVCache(KVCache&& other) noexcept
       conv_states_(std::move(other.conv_states_)),
       d_raw_kv_storage_(other.d_raw_kv_storage_),
       d_raw_recurrent_storage_(other.d_raw_recurrent_storage_),
+      d_raw_recurrent_checkpoint_(other.d_raw_recurrent_checkpoint_),
       kv_storage_bytes_(other.kv_storage_bytes_),
-      recurrent_storage_bytes_(other.recurrent_storage_bytes_) {
+      recurrent_storage_bytes_(other.recurrent_storage_bytes_),
+      has_recurrent_checkpoint_(other.has_recurrent_checkpoint_) {
     other.d_raw_kv_storage_ = nullptr;
     other.d_raw_recurrent_storage_ = nullptr;
+    other.d_raw_recurrent_checkpoint_ = nullptr;
+    other.has_recurrent_checkpoint_ = false;
     other.current_seq_len_ = 0;
 }
 
@@ -52,6 +60,7 @@ KVCache& KVCache::operator=(KVCache&& other) noexcept {
             auto& q = ctx_->queue();
             if (d_raw_kv_storage_) sycl::free(d_raw_kv_storage_, q);
             if (d_raw_recurrent_storage_) sycl::free(d_raw_recurrent_storage_, q);
+            if (d_raw_recurrent_checkpoint_) sycl::free(d_raw_recurrent_checkpoint_, q);
         }
         ctx_ = std::move(other.ctx_);
         config_ = other.config_;
@@ -68,11 +77,15 @@ KVCache& KVCache::operator=(KVCache&& other) noexcept {
         conv_states_ = std::move(other.conv_states_);
         d_raw_kv_storage_ = other.d_raw_kv_storage_;
         d_raw_recurrent_storage_ = other.d_raw_recurrent_storage_;
+        d_raw_recurrent_checkpoint_ = other.d_raw_recurrent_checkpoint_;
         kv_storage_bytes_ = other.kv_storage_bytes_;
         recurrent_storage_bytes_ = other.recurrent_storage_bytes_;
+        has_recurrent_checkpoint_ = other.has_recurrent_checkpoint_;
 
         other.d_raw_kv_storage_ = nullptr;
         other.d_raw_recurrent_storage_ = nullptr;
+        other.d_raw_recurrent_checkpoint_ = nullptr;
+        other.has_recurrent_checkpoint_ = false;
         other.current_seq_len_ = 0;
     }
     return *this;
@@ -206,6 +219,7 @@ void KVCache::clear() {
         q.memset(d_raw_recurrent_storage_, 0, recurrent_storage_bytes_);
     }
     current_seq_len_ = 0;
+    has_recurrent_checkpoint_ = false;
     q.wait();
 }
 
@@ -443,6 +457,34 @@ const float* KVCache::conv_state(size_t linear_layer_idx) const {
 
 size_t KVCache::total_allocated_bytes() const noexcept {
     return kv_storage_bytes_ + recurrent_storage_bytes_;
+}
+
+void KVCache::rollback(size_t steps) {
+    if (steps > current_seq_len_) {
+        throw std::out_of_range("KVCache::rollback: steps (" + std::to_string(steps) +
+                                ") > current_seq_len (" + std::to_string(current_seq_len_) + ")");
+    }
+    current_seq_len_ -= steps;
+    if (has_recurrent_checkpoint_) {
+        restore_recurrent_state();
+        has_recurrent_checkpoint_ = false;
+    }
+}
+
+void KVCache::checkpoint_recurrent_state() {
+    if (!ctx_ || !d_raw_recurrent_storage_ || recurrent_storage_bytes_ == 0) return;
+    auto& q = ctx_->queue();
+    if (!d_raw_recurrent_checkpoint_) {
+        d_raw_recurrent_checkpoint_ = sycl::malloc_device(recurrent_storage_bytes_, q);
+    }
+    q.memcpy(d_raw_recurrent_checkpoint_, d_raw_recurrent_storage_, recurrent_storage_bytes_).wait();
+    has_recurrent_checkpoint_ = true;
+}
+
+void KVCache::restore_recurrent_state() {
+    if (!ctx_ || !d_raw_recurrent_storage_ || !d_raw_recurrent_checkpoint_ || !has_recurrent_checkpoint_) return;
+    auto& q = ctx_->queue();
+    q.memcpy(d_raw_recurrent_storage_, d_raw_recurrent_checkpoint_, recurrent_storage_bytes_).wait();
 }
 
 } // namespace xinfer::core

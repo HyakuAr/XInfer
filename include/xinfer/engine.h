@@ -21,6 +21,7 @@ struct GenerationConfig {
     int64_t eos_token_id{-1};            // Sentinel: default (-1) resolves dynamically to loaded model/tokenizer EOS (<|endoftext|>)
     int64_t im_end_token_id{-1};         // Sentinel: default (-1) resolves dynamically to loaded model/tokenizer IM_END (<|im_end|>)
     bool    apply_chat_template{true};
+    int     draft_tokens_num{0};         // Speculative draft tokens (0 = default/disabled, >0 = draft N tokens)
 };
 
 struct EngineConfig {
@@ -33,6 +34,8 @@ struct EngineConfig {
     size_t      prefill_chunk_size{512}; // Chunk size for chunked prefill
     bool        validate_checksum{true}; // Whole-file CRC-64 validation (Fail-Fast Integrity, default true)
     bool        use_int8_kv{false};      // Quantize KV cache to INT8 per-head
+    bool        enable_speculative{false}; // Enable Speculative Decoding / MTP
+    size_t      draft_tokens_num{4};     // Number of speculative draft tokens (N, typically 4-8)
 };
 
 // Streaming token callback: returns false to halt generation
