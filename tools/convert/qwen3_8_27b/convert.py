@@ -11,6 +11,7 @@ import time
 import struct
 import ctypes
 import argparse
+import math
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
 import functools
@@ -145,6 +146,34 @@ def dequantize_int4_symmetric(packed_bytes: bytes, scales: torch.Tensor, orig_sh
     
     dequant = unpacked * scales.view(-1, 1).float()
     return dequant.view(orig_shape)
+
+
+def compute_cosine_similarity(t1: torch.Tensor, t2: torch.Tensor, chunk_size: int = 10_000_000) -> float:
+    """
+    Numerically stable cosine similarity using chunked float64 accumulation.
+    Avoids float32 reduction underflow on large tensors (e.g. lm_head with ~1.27B elements)
+    which causes PyTorch's native F.cosine_similarity to produce impossible values > 1.0.
+    """
+    flat1 = t1.reshape(-1)
+    flat2 = t2.reshape(-1)
+    n = flat1.numel()
+
+    dot_sum = 0.0
+    norm1_sq = 0.0
+    norm2_sq = 0.0
+
+    for start in range(0, n, chunk_size):
+        end = min(start + chunk_size, n)
+        c1 = flat1[start:end].double()
+        c2 = flat2[start:end].double()
+        dot_sum += torch.dot(c1, c2).item()
+        norm1_sq += torch.dot(c1, c1).item()
+        norm2_sq += torch.dot(c2, c2).item()
+
+    denom = math.sqrt(norm1_sq) * math.sqrt(norm2_sq)
+    if denom == 0.0:
+        return 0.0
+    return float(dot_sum / denom)
 
 
 def should_quantize_tensor(name: str, tensor: torch.Tensor, group_size: int) -> bool:
@@ -325,10 +354,18 @@ def main():
                             max_err = float(torch.max(diff))
                             mean_err = float(torch.mean(diff))
                             max_bound = float(torch.max(scales / 2.0)) + 1e-4
-                            cos_sim = float(torch.nn.functional.cosine_similarity(
-                                tensor.float().view(-1), dequant.view(-1), dim=0
-                            ))
-                            passed = bool(max_err <= max_bound)
+                            cos_sim = compute_cosine_similarity(tensor.float(), dequant)
+
+                            # Sanity check: cosine similarity must be mathematically bounded to [-1.0, 1.0]
+                            # Allow small floating-point tolerance (1e-4) for float64 accumulation
+                            small_tolerance = 1e-4
+                            assert abs(cos_sim) <= 1.0 + small_tolerance, (
+                                f"FATAL: Cosine similarity out of mathematical bounds [-1.0, 1.0]: "
+                                f"{cos_sim} for {tname} (violates sanity check)"
+                            )
+                            cos_sim = min(1.0, max(-1.0, cos_sim))
+                            passed = bool(max_err <= max_bound and abs(cos_sim) <= 1.0 + small_tolerance and cos_sim >= 0.95)
+
 
                             parity_results.append({
                                 "tensor_name": tname,
