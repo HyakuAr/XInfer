@@ -454,3 +454,19 @@ target_link_libraries(dump_engine_logits PRIVATE
 )
 target_compile_options(dump_engine_logits PRIVATE -fsycl)
 target_link_options(dump_engine_logits PRIVATE -fsycl)
+
+# Evaluation & Perplexity Scoring
+add_executable(eval_perplexity
+    tools/eval/eval_perplexity.cpp
+)
+target_include_directories(eval_perplexity PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(eval_perplexity PRIVATE
+    xinfer_targets
+    xinfer_runtime
+    xinfer_ops
+)
+target_compile_options(eval_perplexity PRIVATE -fsycl)
+target_link_options(eval_perplexity PRIVATE -fsycl)
