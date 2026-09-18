@@ -71,4 +71,37 @@ private:
     DeviceArchInfo arch_info_;
 };
 
+// Image dimensions descriptor
+struct ImageDimensions {
+    int64_t width{0};
+    int64_t height{0};
+    int64_t channels{3};
+};
+
+// Parse image dimensions from binary header (PNG, BMP, JPEG)
+bool parse_image_dimensions(const uint8_t* data, size_t size, ImageDimensions& out_dims, std::string* error_msg = nullptr);
+
+// Fail-loud validation of image dimensions and aspect ratio
+// Enforces max_resolution (e.g. 1024x1024) and max_aspect_ratio (e.g. 4:1)
+bool validate_image_dimensions(int64_t width, int64_t height,
+                               int64_t max_resolution = 1024,
+                               float max_aspect_ratio = 4.0f,
+                               std::string* error_msg = nullptr);
+
+// Offload image resizing (bilinear interpolation) and normalization (RGB [0, 255] -> [-1.0, 1.0])
+// directly into USM memory (device or shared) in ViT patch-flattened layout [num_patches, patch_dim]
+// (default num_patches=256, patch_dim=3*14*14=588) matching the ViT input contract.
+sycl::half* preprocess_image_to_usm(
+    DeviceContext& ctx,
+    const uint8_t* rgb_pixels,
+    int64_t src_w,
+    int64_t src_h,
+    int64_t channels = 3,
+    int64_t dst_w = 224,
+    int64_t dst_h = 224,
+    bool use_shared_mem = false,
+    sycl::half* out_buffer = nullptr
+);
+
 } // namespace xinfer::core
+

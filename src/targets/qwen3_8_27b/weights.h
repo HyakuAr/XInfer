@@ -148,6 +148,32 @@ struct ModelConfig {
         return (l % interval == interval - 1);
     }
 
+    // Vision encoder configuration (Qwen3.8 Vision ViT)
+    static constexpr int64_t kDefaultVisionWidth = 1024;
+    static constexpr int64_t kDefaultVisionLayers = 24;
+    static constexpr int64_t kDefaultVisionHeads = 16;
+    static constexpr int64_t kDefaultVisionMlpRatio = 4;
+    static constexpr int64_t kDefaultVisionPatchSize = 14;
+    static constexpr int64_t kDefaultPatchesPerImage = 256;
+    static constexpr int64_t kDefaultMaxImageResolution = 1024;
+    static constexpr float   kDefaultMaxAspectRatio = 4.0f;
+    static constexpr int64_t kDefaultVisualTokenStart = 248000;
+    static constexpr int64_t kDefaultVisualTokenEnd = 248319;
+    static constexpr int64_t kDefaultImagePadTokenId = 248064;
+
+    bool    has_vision{false};
+    int64_t vision_width{kDefaultVisionWidth};
+    int64_t vision_layers{kDefaultVisionLayers};
+    int64_t vision_heads{kDefaultVisionHeads};
+    int64_t vision_mlp_ratio{kDefaultVisionMlpRatio};
+    int64_t vision_patch_size{kDefaultVisionPatchSize};
+    int64_t patches_per_image{kDefaultPatchesPerImage};
+    int64_t max_image_resolution{kDefaultMaxImageResolution};
+    float   max_aspect_ratio{kDefaultMaxAspectRatio};
+    int64_t visual_token_start{kDefaultVisualTokenStart};
+    int64_t visual_token_end{kDefaultVisualTokenEnd};
+    int64_t image_pad_token_id{kDefaultImagePadTokenId};
+
     std::string quant_scheme;
     bool is_int8_kv{false};
 
@@ -169,6 +195,38 @@ struct ModelConfig {
     }
 };
 
+struct VisionWeights {
+    bool is_valid{false};
+    int64_t width{1024};
+    int64_t layers{24};
+    int64_t heads{16};
+    int64_t patch_size{14};
+    int64_t in_channels{3};
+    int64_t patches_per_image{256};
+
+    // Patch embedding weights: [width, in_channels * patch_size * patch_size]
+    void* d_patch_embed_weight{nullptr}; // FP16
+    void* d_patch_embed_bias{nullptr};   // FP16/FP32
+    void* d_pos_embed{nullptr};          // [patches_per_image, width]
+
+    // ViT layers (qkv, out_proj, mlp)
+    struct ViTLayerWeights {
+        void* d_qkv_weight{nullptr};     // [3 * width, width]
+        void* d_qkv_bias{nullptr};       // [3 * width]
+        void* d_proj_weight{nullptr};    // [width, width]
+        void* d_proj_bias{nullptr};      // [width]
+        void* d_mlp_fc1_weight{nullptr}; // [mlp_dim, width]
+        void* d_mlp_fc1_bias{nullptr};   // [mlp_dim]
+        void* d_mlp_fc2_weight{nullptr}; // [width, mlp_dim]
+        void* d_mlp_fc2_bias{nullptr};   // [width]
+    };
+    std::vector<ViTLayerWeights> layers_weights;
+
+    // Visual Projector: ViT width (1024) -> LLM hidden_size (5120)
+    void* d_projector_fc1_weight{nullptr}; // [llm_hidden_size, width]
+    void* d_projector_fc1_bias{nullptr};   // [llm_hidden_size]
+};
+
 class LoadedModel {
 public:
     static std::unique_ptr<LoadedModel> load_from_artifact(
@@ -176,6 +234,16 @@ public:
         artifact::ArtifactReader& reader,
         std::string* error_msg = nullptr
     );
+
+    // Mock factory for unit testing and bounds validation without disk artifact
+    static std::unique_ptr<LoadedModel> create_mock(
+        std::shared_ptr<core::DeviceContext> ctx,
+        const ModelConfig& config = {}
+    ) {
+        auto model = std::unique_ptr<LoadedModel>(new LoadedModel(ctx));
+        model->config_ = config;
+        return model;
+    }
 
     ~LoadedModel();
 
@@ -189,6 +257,10 @@ public:
     const float* d_final_norm() const noexcept { return d_final_norm_; }
     const LinearWeightView& lm_head() const noexcept { return lm_head_; }
 
+    const VisionWeights& vision_weights() const noexcept { return vision_weights_; }
+    bool has_vision() const noexcept { return vision_weights_.is_valid; }
+    void set_vision_weights(VisionWeights weights) { vision_weights_ = std::move(weights); }
+
 private:
     explicit LoadedModel(std::shared_ptr<core::DeviceContext> ctx);
 
@@ -200,6 +272,7 @@ private:
     LinearWeightView lm_head_;       // [vocab_size, hidden_size] INT4
 
     std::vector<LayerWeights> layers_;
+    VisionWeights vision_weights_;
     std::vector<void*> allocated_device_ptrs_;
 };
 

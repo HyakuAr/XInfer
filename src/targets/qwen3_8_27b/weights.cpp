@@ -223,6 +223,22 @@ std::unique_ptr<LoadedModel> LoadedModel::load_from_artifact(
         return nullptr;
     }
 
+    // Parse optional Vision configuration
+    auto it_has_vision = meta.properties.find("has_vision");
+    if (it_has_vision != meta.properties.end()) {
+        model->config_.has_vision = (it_has_vision->second == "true" || it_has_vision->second == "1");
+    }
+    validate_optional_int_prop("vision_width", model->config_.vision_width);
+    validate_optional_int_prop("vision_layers", model->config_.vision_layers);
+    validate_optional_int_prop("vision_heads", model->config_.vision_heads);
+    validate_optional_int_prop("vision_mlp_ratio", model->config_.vision_mlp_ratio);
+    validate_optional_int_prop("vision_patch_size", model->config_.vision_patch_size);
+    validate_optional_int_prop("patches_per_image", model->config_.patches_per_image);
+    validate_optional_int_prop("max_image_resolution", model->config_.max_image_resolution);
+    validate_optional_int_prop("visual_token_start", model->config_.visual_token_start);
+    validate_optional_int_prop("visual_token_end", model->config_.visual_token_end);
+    validate_optional_int_prop("image_pad_token_id", model->config_.image_pad_token_id);
+
     // Helper lambda to allocate device memory and track for cleanup
     auto alloc_dev = [&](size_t bytes) -> void* {
         void* ptr = ctx->allocate_device(bytes);
@@ -622,6 +638,63 @@ std::unique_ptr<LoadedModel> LoadedModel::load_from_artifact(
 
         if ((l + 1) % 16 == 0 || l == model->config_.num_hidden_layers - 1) {
             std::cout << "[xinfer] Loaded layer " << (l + 1) << " / " << model->config_.num_hidden_layers << std::endl;
+        }
+    }
+
+    auto load_fp16 = [&](const std::string& section_name, size_t num_elements) -> void* {
+        std::vector<uint8_t> host_raw;
+        if (!reader.read_section(section_name, host_raw, error_msg)) {
+            return nullptr;
+        }
+        size_t expected_bytes = num_elements * sizeof(uint16_t);
+        if (host_raw.size() != expected_bytes) {
+            std::string msg = "Size mismatch for " + section_name + ": expected " +
+                              std::to_string(expected_bytes) + ", got " + std::to_string(host_raw.size());
+            std::cerr << "[Error] " << msg << std::endl;
+            if (error_msg) *error_msg = msg;
+            return nullptr;
+        }
+        void* d_ptr = alloc_dev(host_raw.size());
+        if (d_ptr) {
+            ctx->copy_host_to_device(d_ptr, host_raw.data(), host_raw.size(), true);
+        }
+        return d_ptr;
+    };
+
+    // Load Vision weights if present in artifact
+    if (model->config_.has_vision || reader.has_section("visual.patch_embed.weight")) {
+        std::cout << "[xinfer] Loading Vision ViT weights into Intel Arc Pro B60 VRAM..." << std::endl;
+        VisionWeights v_weights;
+        v_weights.width = model->config_.vision_width;
+        v_weights.layers = model->config_.vision_layers;
+        v_weights.heads = model->config_.vision_heads;
+        v_weights.patch_size = model->config_.vision_patch_size;
+        v_weights.patches_per_image = model->config_.patches_per_image;
+
+        int64_t patch_dim = v_weights.in_channels * v_weights.patch_size * v_weights.patch_size;
+        if (reader.has_section("visual.patch_embed.weight")) {
+            v_weights.d_patch_embed_weight = load_fp16("visual.patch_embed.weight", v_weights.width * patch_dim);
+        }
+        if (reader.has_section("visual.patch_embed.bias")) {
+            v_weights.d_patch_embed_bias = load_fp16("visual.patch_embed.bias", v_weights.width);
+        }
+        if (reader.has_section("visual.pos_embed")) {
+            v_weights.d_pos_embed = load_fp16("visual.pos_embed", v_weights.patches_per_image * v_weights.width);
+        }
+
+        // Projector
+        if (reader.has_section("visual.projector.weight")) {
+            v_weights.d_projector_fc1_weight = load_fp16("visual.projector.weight", model->config_.hidden_size * v_weights.width);
+        }
+        if (reader.has_section("visual.projector.bias")) {
+            v_weights.d_projector_fc1_bias = load_fp16("visual.projector.bias", model->config_.hidden_size);
+        }
+
+        v_weights.is_valid = (v_weights.d_patch_embed_weight != nullptr);
+        model->vision_weights_ = v_weights;
+        model->config_.has_vision = v_weights.is_valid;
+        if (v_weights.is_valid) {
+            std::cout << "[xinfer] Successfully loaded Vision ViT weights!" << std::endl;
         }
     }
 

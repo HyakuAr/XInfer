@@ -21,7 +21,11 @@ sycl::event embed_tokens_lookup_impl(sycl::queue& q,
                                       const int64_t* d_token_ids,
                                       int64_t num_tokens,
                                       int64_t hidden_size,
-                                      int64_t vocab_size = qwen3_8_27b::ModelConfig::kDefaultVocabSize) {
+                                      int64_t vocab_size = qwen3_8_27b::ModelConfig::kDefaultVocabSize,
+                                      const OutT* d_vit_embeddings = nullptr,
+                                      int64_t visual_token_start = -1,
+                                      int64_t visual_token_end = -1,
+                                      const int64_t* d_visual_indices = nullptr) {
     if (!out_act || !embed_table_bf16 || !d_token_ids || num_tokens <= 0 || hidden_size <= 0) {
         return sycl::event{};
     }
@@ -31,6 +35,17 @@ sycl::event embed_tokens_lookup_impl(sycl::queue& q,
         int64_t t = idx[0];
         int64_t d = idx[1];
         int64_t token_id = d_token_ids[t];
+
+        // Zero-Copy Visual Token Injection:
+        // Check if token_id falls within the reserved visual token range.
+        // If it does and ViT embeddings buffer is provided, read directly from the ViT's output USM buffer.
+        if (d_vit_embeddings && visual_token_start >= 0 && token_id >= visual_token_start && token_id <= visual_token_end) {
+            int64_t v_idx = d_visual_indices ? d_visual_indices[t] : (token_id - visual_token_start);
+            if (v_idx >= 0) {
+                out_act[t * hidden_size + d] = d_vit_embeddings[v_idx * hidden_size + d];
+                return;
+            }
+        }
 
 #if defined(_DEBUG)
         assert(token_id >= 0 && (vocab_size <= 0 || token_id < vocab_size));
@@ -54,8 +69,13 @@ sycl::event embed_tokens_lookup(sycl::queue& q,
                                  const int64_t* d_token_ids,
                                  int64_t num_tokens,
                                  int64_t hidden_size,
-                                 int64_t vocab_size) {
-    return embed_tokens_lookup_impl<sycl::half>(q, out_act, embed_table_bf16, d_token_ids, num_tokens, hidden_size, vocab_size);
+                                 int64_t vocab_size,
+                                 const sycl::half* d_vit_embeddings,
+                                 int64_t visual_token_start,
+                                 int64_t visual_token_end,
+                                 const int64_t* d_visual_indices) {
+    return embed_tokens_lookup_impl<sycl::half>(q, out_act, embed_table_bf16, d_token_ids, num_tokens, hidden_size, vocab_size,
+                                                d_vit_embeddings, visual_token_start, visual_token_end, d_visual_indices);
 }
 
 sycl::event embed_tokens_lookup(sycl::queue& q,
@@ -64,8 +84,13 @@ sycl::event embed_tokens_lookup(sycl::queue& q,
                                  const int64_t* d_token_ids,
                                  int64_t num_tokens,
                                  int64_t hidden_size,
-                                 int64_t vocab_size) {
-    return embed_tokens_lookup_impl<float>(q, out_act, embed_table_bf16, d_token_ids, num_tokens, hidden_size, vocab_size);
+                                 int64_t vocab_size,
+                                 const float* d_vit_embeddings,
+                                 int64_t visual_token_start,
+                                 int64_t visual_token_end,
+                                 const int64_t* d_visual_indices) {
+    return embed_tokens_lookup_impl<float>(q, out_act, embed_table_bf16, d_token_ids, num_tokens, hidden_size, vocab_size,
+                                           d_vit_embeddings, visual_token_start, visual_token_end, d_visual_indices);
 }
 
 void forward_layer(sycl::queue& q,
@@ -294,7 +319,9 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
                    bool is_graph_capture,
                    const LayerActivationBuffers* preallocated_bufs,
                    int64_t* preallocated_token_ids,
-                   int64_t* preallocated_positions) {
+                   int64_t* preallocated_positions,
+                   const VisionInput* vision_input,
+                   const int64_t* d_visual_indices) {
     if (seq_len <= 0) return;
     if (start_pos < 0 || start_pos + seq_len > static_cast<int64_t>(kv_cache.max_seq_len())) {
         std::cerr << "[xinfer::qwen3_8] Error: forward_chunk bounds exceeded: start_pos="
@@ -319,7 +346,9 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
         : static_cast<int64_t*>(arena.allocate(seq_len * sizeof(int64_t)));
     std::vector<int64_t> host_pos(seq_len);
     for (int64_t i = 0; i < seq_len; ++i) host_pos[i] = start_pos + i;
-    ctx->copy_host_to_device(d_positions, host_pos.data(), seq_len * sizeof(int64_t), true);
+    q.parallel_for(sycl::range<1>(seq_len), [=](sycl::id<1> idx) {
+        d_positions[idx[0]] = start_pos + static_cast<int64_t>(idx[0]);
+    });
 
     // Common activation buffers (FP16 / sycl::half for 2x GDDR6 bandwidth efficiency)
     const auto& cfg = model.config();
@@ -349,8 +378,10 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
         bufs.act_delta_out = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_z_dim * sizeof(sycl::half)));
     }
 
-    // 1. Initial embedding lookup
-    embed_tokens_lookup(q, bufs.act_x, model.d_embed_tokens(), d_token_ids, seq_len, hidden_size, cfg.vocab_size);
+    // 1. Initial embedding lookup with Zero-Copy Visual Token Injection
+    const sycl::half* d_vit_embeddings = (vision_input && vision_input->d_vit_embeddings) ? vision_input->d_vit_embeddings : nullptr;
+    embed_tokens_lookup(q, bufs.act_x, model.d_embed_tokens(), d_token_ids, seq_len, hidden_size, cfg.vocab_size,
+                        d_vit_embeddings, cfg.visual_token_start, cfg.visual_token_end, d_visual_indices);
 
     // 2. Loop over layers using shared parameterized forward_layer
     const auto& layers = model.layers();
@@ -374,7 +405,8 @@ int64_t prefill_prompt(std::shared_ptr<core::DeviceContext> ctx,
                        core::KVCache& kv_cache,
                        const std::vector<int64_t>& prompt_tokens,
                        size_t chunk_size,
-                       bool is_graph_capture) {
+                       bool is_graph_capture,
+                       const VisionInput* vision_input) {
     if (prompt_tokens.empty()) return 0;
     if (prompt_tokens.size() > kv_cache.max_seq_len()) {
         std::string err = "context_length_exceeded: Prompt tokens (" + std::to_string(prompt_tokens.size()) +
@@ -383,6 +415,62 @@ int64_t prefill_prompt(std::shared_ptr<core::DeviceContext> ctx,
         throw context_length_exceeded(err);
     }
     const auto& cfg = model.config();
+
+    // Visual placeholder token counting and strict fail-loud verification
+    size_t visual_token_count = 0;
+    std::vector<int64_t> visual_indices_host(prompt_tokens.size(), -1);
+    for (size_t i = 0; i < prompt_tokens.size(); ++i) {
+        int64_t tok = prompt_tokens[i];
+        if (tok >= cfg.visual_token_start && tok <= cfg.visual_token_end) {
+            visual_indices_host[i] = static_cast<int64_t>(visual_token_count);
+            visual_token_count++;
+        }
+    }
+
+    size_t patches_per_img = cfg.patches_per_image > 0 ? static_cast<size_t>(cfg.patches_per_image) : 256;
+    size_t expected_images_from_tags = visual_token_count / patches_per_img;
+
+    if (visual_token_count > 0 && visual_token_count % patches_per_img != 0) {
+        std::string err = "vision_format_error: Visual placeholder tokens (" + std::to_string(visual_token_count) +
+                          ") is not a multiple of expected patches per image (" + std::to_string(patches_per_img) + ")";
+        std::cerr << "[xinfer::qwen3_8] Error: " << err << std::endl;
+        throw vision_format_error(err);
+    }
+
+    // Fail-loud contract checks:
+    size_t provided_images = vision_input ? vision_input->num_images : 0;
+    if (provided_images > 0 && expected_images_from_tags == 0) {
+        std::string err = "vision_format_error: User provided " + std::to_string(provided_images) +
+                          " image(s) but prompt contains 0 <image> tags";
+        std::cerr << "[xinfer::qwen3_8] Error: " << err << std::endl;
+        throw vision_format_error(err);
+    }
+    if (provided_images == 0 && expected_images_from_tags > 0) {
+        std::string err = "vision_format_error: Prompt contains " + std::to_string(expected_images_from_tags) +
+                          " <image> tag(s) (" + std::to_string(visual_token_count) + " patches) but no image was provided";
+        std::cerr << "[xinfer::qwen3_8] Error: " << err << std::endl;
+        throw vision_format_error(err);
+    }
+    if (provided_images > 0 && vision_input) {
+        if (provided_images != expected_images_from_tags) {
+            std::string err = "vision_format_error: Number of provided images (" + std::to_string(provided_images) +
+                              ") does not match <image> tags in prompt (" + std::to_string(expected_images_from_tags) + ")";
+            std::cerr << "[xinfer::qwen3_8] Error: " << err << std::endl;
+            throw vision_format_error(err);
+        }
+        if (vision_input->num_patches != visual_token_count) {
+            std::string err = "vision_format_error: ViT output tensor dimensions (" + std::to_string(vision_input->num_patches) +
+                              " patches) does not match expected prompt visual patches (" + std::to_string(visual_token_count) + ")";
+            std::cerr << "[xinfer::qwen3_8] Error: " << err << std::endl;
+            throw vision_format_error(err);
+        }
+        if (!vision_input->d_vit_embeddings) {
+            std::string err = "vision_format_error: ViT output USM buffer pointer is null";
+            std::cerr << "[xinfer::qwen3_8] Error: " << err << std::endl;
+            throw vision_format_error(err);
+        }
+    }
+
     for (size_t i = 0; i < prompt_tokens.size(); ++i) {
         if (prompt_tokens[i] < 0 || prompt_tokens[i] >= cfg.vocab_size) {
             std::cerr << "[xinfer::qwen3_8] Error: Prompt token at index " << i << " ("
@@ -396,6 +484,12 @@ int64_t prefill_prompt(std::shared_ptr<core::DeviceContext> ctx,
     kv_cache.clear();
 
     float* d_logits = static_cast<float*>(arena.persistent_buffer(cfg.vocab_size * sizeof(float)));
+
+    int64_t* d_all_visual_indices = nullptr;
+    if (visual_token_count > 0) {
+        d_all_visual_indices = static_cast<int64_t*>(arena.allocate(prompt_tokens.size() * sizeof(int64_t)));
+        ctx->copy_host_to_device(d_all_visual_indices, visual_indices_host.data(), prompt_tokens.size() * sizeof(int64_t), true);
+    }
 
     // Graph Capture Contract: pre-allocate persistent activation buffers for chunk_size in DeviceArena
     // before beginning graph recording / chunk loop to guarantee address stability without resetting arena
@@ -444,7 +538,9 @@ int64_t prefill_prompt(std::shared_ptr<core::DeviceContext> ctx,
                       is_graph_capture,
                       is_graph_capture ? &chunk_bufs : nullptr,
                       d_chunk_tokens,
-                      d_chunk_positions);
+                      d_chunk_positions,
+                      vision_input,
+                      d_all_visual_indices ? (d_all_visual_indices + offset) : nullptr);
 
         start_pos += static_cast<int64_t>(cur_chunk);
         offset += cur_chunk;

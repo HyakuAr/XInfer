@@ -476,6 +476,239 @@ ApiError make_context_length_exceeded_error(size_t max_seq_len, size_t prompt_to
     return err;
 }
 
+static const signed char kBase64Table[256] = {
+    -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
+    -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
+    -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,62, -1,-1,-1,63,
+    52,53,54,55, 56,57,58,59, 60,61,-1,-1, -1,-1,-1,-1,
+    -1, 0, 1, 2,  3, 4, 5, 6,  7, 8, 9,10, 11,12,13,14,
+    15,16,17,18, 19,20,21,22, 23,24,25,-1, -1,-1,-1,-1,
+    -1,26,27,28, 29,30,31,32, 33,34,35,36, 37,38,39,40,
+    41,42,43,44, 45,46,47,48, 49,50,51,-1, -1,-1,-1,-1,
+    -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
+    -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
+    -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
+    -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
+    -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
+    -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
+    -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
+    -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1
+};
+
+bool decode_base64_chunked(std::string_view input,
+                           std::vector<uint8_t>& out_bytes,
+                           std::string* error_msg,
+                           size_t chunk_size) {
+    // Strip data URI prefix if present (e.g. "data:image/jpeg;base64,")
+    size_t comma_pos = input.find(',');
+    if (comma_pos != std::string_view::npos && input.substr(0, comma_pos).find("base64") != std::string_view::npos) {
+        input = input.substr(comma_pos + 1);
+    }
+
+    out_bytes.clear();
+    if (chunk_size == 0) chunk_size = 4096;
+    out_bytes.reserve((input.size() / 4) * 3);
+
+    uint32_t buf = 0;
+    int bits = 0;
+
+    for (size_t i = 0; i < input.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(input[i]);
+        if (std::isspace(c)) continue;
+        if (c == '=') break; // padding reached
+
+        signed char val = kBase64Table[c];
+        if (val < 0) {
+            if (error_msg) *error_msg = std::string("Invalid base64 character '") + static_cast<char>(c) + "' at position " + std::to_string(i);
+            return false;
+        }
+
+        buf = (buf << 6) | static_cast<uint32_t>(val);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out_bytes.push_back(static_cast<uint8_t>((buf >> bits) & 0xFF));
+        }
+    }
+
+    return true;
+}
+
+const MultipartPart* MultipartFormData::find_part(const std::string& name) const {
+    for (const auto& p : parts) {
+        if (p.name == name) return &p;
+    }
+    return nullptr;
+}
+
+bool parse_multipart_form_data(std::string_view body,
+                               std::string_view boundary,
+                               MultipartFormData& out_form,
+                               std::string* error_msg) {
+    out_form.parts.clear();
+    if (boundary.empty()) {
+        if (error_msg) *error_msg = "Empty multipart boundary";
+        return false;
+    }
+
+    if (boundary.size() >= 2 && boundary.front() == '"' && boundary.back() == '"') {
+        boundary = boundary.substr(1, boundary.size() - 2);
+    }
+
+    std::string delim = "--" + std::string(boundary);
+    size_t pos = body.find(delim);
+    if (pos == std::string_view::npos) {
+        if (error_msg) *error_msg = "Boundary delimiter not found in multipart body";
+        return false;
+    }
+
+    while (pos != std::string_view::npos) {
+        pos += delim.size();
+        if (pos + 2 <= body.size() && body.substr(pos, 2) == "--") {
+            break; // End delimiter
+        }
+        if (pos + 2 <= body.size() && body.substr(pos, 2) == "\r\n") {
+            pos += 2;
+        } else if (pos + 1 <= body.size() && body[pos] == '\n') {
+            pos += 1;
+        }
+
+        size_t next_delim = body.find(delim, pos);
+        if (next_delim == std::string_view::npos) break;
+
+        std::string_view part_raw = body.substr(pos, next_delim - pos);
+        size_t header_end = part_raw.find("\r\n\r\n");
+        size_t sep_len = 4;
+        if (header_end == std::string_view::npos) {
+            header_end = part_raw.find("\n\n");
+            sep_len = 2;
+        }
+
+        if (header_end != std::string_view::npos) {
+            std::string_view header_section = part_raw.substr(0, header_end);
+            std::string_view part_data = part_raw.substr(header_end + sep_len);
+            if (part_data.size() >= 2 && part_data.substr(part_data.size() - 2) == "\r\n") {
+                part_data = part_data.substr(0, part_data.size() - 2);
+            } else if (!part_data.empty() && part_data.back() == '\n') {
+                part_data = part_data.substr(0, part_data.size() - 1);
+            }
+
+            MultipartPart part;
+            part.data = std::string(part_data);
+
+            std::string h_str(header_section);
+            std::istringstream h_stream(h_str);
+            std::string line;
+            while (std::getline(h_stream, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                size_t colon = line.find(':');
+                if (colon == std::string::npos) continue;
+
+                std::string h_name = line.substr(0, colon);
+                std::string h_val = line.substr(colon + 1);
+                while (!h_val.empty() && (h_val.front() == ' ' || h_val.front() == '\t')) h_val.erase(0, 1);
+
+                std::string h_name_lower = h_name;
+                std::transform(h_name_lower.begin(), h_name_lower.end(), h_name_lower.begin(), ::tolower);
+
+                if (h_name_lower == "content-disposition") {
+                    size_t name_pos = h_val.find("name=\"");
+                    if (name_pos != std::string::npos) {
+                        size_t start = name_pos + 6;
+                        size_t end = h_val.find('"', start);
+                        if (end != std::string::npos) {
+                            part.name = h_val.substr(start, end - start);
+                        }
+                    }
+                    size_t fn_pos = h_val.find("filename=\"");
+                    if (fn_pos != std::string::npos) {
+                        size_t start = fn_pos + 10;
+                        size_t end = h_val.find('"', start);
+                        if (end != std::string::npos) {
+                            part.filename = h_val.substr(start, end - start);
+                        }
+                    }
+                } else if (h_name_lower == "content-type") {
+                    part.content_type = h_val;
+                }
+            }
+
+            out_form.parts.push_back(std::move(part));
+        }
+
+        pos = next_delim;
+    }
+
+    return true;
+}
+
+bool parse_multipart_chat_completion_request(std::string_view body,
+                                             std::string_view boundary,
+                                             ChatCompletionRequest& out_req,
+                                             ApiError& out_err) {
+    MultipartFormData form;
+    std::string form_err;
+    if (!parse_multipart_form_data(body, boundary, form, &form_err)) {
+        out_err.status_code = 400;
+        out_err.type = "invalid_request_error";
+        out_err.code = "multipart_parse_error";
+        out_err.message = "Failed to parse multipart form-data: " + form_err;
+        return false;
+    }
+
+    const auto* msg_part = form.find_part("messages");
+    if (!msg_part) msg_part = form.find_part("json");
+    if (!msg_part) msg_part = form.find_part("request");
+
+    if (msg_part) {
+        if (!parse_chat_completion_request(msg_part->data, out_req, out_err)) {
+            return false;
+        }
+    } else {
+        const auto* prompt_part = form.find_part("prompt");
+        if (prompt_part) {
+            out_req.messages.push_back(ChatMessage{.role = "user", .content = prompt_part->data, .reasoning_content = ""});
+        }
+    }
+
+    for (const auto& part : form.parts) {
+        if (part.name == "image" || part.name == "file" || part.content_type.rfind("image/", 0) == 0) {
+            ImagePayload img;
+            img.raw_bytes.assign(part.data.begin(), part.data.end());
+            img.format = part.content_type;
+            out_req.images.push_back(std::move(img));
+        }
+    }
+
+    if (out_req.messages.empty()) {
+        out_err.status_code = 400;
+        out_err.type = "invalid_request_error";
+        out_err.code = "missing_required_field";
+        out_err.message = "Multipart request must contain a 'messages' or 'prompt' field";
+        return false;
+    }
+
+    if (!out_req.images.empty()) {
+        bool has_image_tag = false;
+        for (const auto& msg : out_req.messages) {
+            if (msg.content.find("<image>") != std::string::npos) {
+                has_image_tag = true;
+                break;
+            }
+        }
+        if (!has_image_tag) {
+            for (auto& msg : out_req.messages) {
+                if (msg.role == "user") {
+                    msg.content = "<image>\n" + msg.content;
+                    break;
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
 bool parse_chat_completion_request(std::string_view json_str,
                                    ChatCompletionRequest& out_req,
                                    ApiError& out_err) {
@@ -536,6 +769,7 @@ bool parse_chat_completion_request(std::string_view json_str,
     }
 
     out_req.messages.clear();
+    out_req.images.clear();
     for (size_t i = 0; i < msgs->arr_val.size(); ++i) {
         const auto& item = msgs->arr_val[i];
         if (item.type != JsonValue::Type::Object) {
@@ -548,7 +782,41 @@ bool parse_chat_completion_request(std::string_view json_str,
 
         ChatMessage msg;
         msg.role = item.get_string("role", "");
-        msg.content = item.get_string("content", "");
+
+        const auto* content_val = item.find("content");
+        if (content_val && content_val->type == JsonValue::Type::Array) {
+            // Multimodal content array: [{"type": "text", "text": "..."}, {"type": "image_url", ...}]
+            std::string text_accum;
+            for (const auto& part : content_val->arr_val) {
+                if (part.type != JsonValue::Type::Object) continue;
+                std::string part_type = part.get_string("type", "");
+                if (part_type == "text") {
+                    text_accum += part.get_string("text", "");
+                } else if (part_type == "image_url") {
+                    const auto* url_obj = part.find("image_url");
+                    std::string url = url_obj ? url_obj->get_string("url", "") : part.get_string("url", "");
+                    if (!url.empty()) {
+                        ImagePayload img;
+                        std::string b64_err;
+                        if (!decode_base64_chunked(url, img.raw_bytes, &b64_err)) {
+                            out_err.status_code = 400;
+                            out_err.type = "invalid_request_error";
+                            out_err.code = "invalid_image_base64";
+                            out_err.message = "Failed to decode base64 image: " + b64_err;
+                            return false;
+                        }
+                        out_req.images.push_back(std::move(img));
+                        if (!text_accum.empty() && text_accum.back() != '\n') {
+                            text_accum += "\n";
+                        }
+                        text_accum += "<image>";
+                    }
+                }
+            }
+            msg.content = std::move(text_accum);
+        } else {
+            msg.content = item.get_string("content", "");
+        }
 
         if (msg.role.empty()) {
             out_err.status_code = 400;

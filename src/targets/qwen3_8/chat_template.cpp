@@ -204,6 +204,32 @@ bool validate_structural_invariants(std::string_view sv, std::string* error_msg)
     return true;
 }
 
+std::string expand_image_tags(std::string_view content, size_t patches_per_image, std::string_view image_pad_token) {
+    if (content.find("<image>") == std::string_view::npos || patches_per_image == 0) {
+        return std::string(content);
+    }
+    std::string pad_seq;
+    pad_seq.reserve(patches_per_image * image_pad_token.size());
+    for (size_t p = 0; p < patches_per_image; ++p) {
+        pad_seq.append(image_pad_token);
+    }
+
+    std::string out;
+    out.reserve(content.size() + pad_seq.size() + 64);
+    size_t pos = 0;
+    while (pos < content.size()) {
+        size_t next = content.find("<image>", pos);
+        if (next == std::string_view::npos) {
+            out.append(content.substr(pos));
+            break;
+        }
+        out.append(content.substr(pos, next - pos));
+        out.append(pad_seq);
+        pos = next + 7; // length of "<image>"
+    }
+    return out;
+}
+
 } // anonymous namespace
 
 QwenChatTemplate::QwenChatTemplate() {
@@ -403,6 +429,9 @@ std::string QwenChatTemplate::render(const std::vector<ChatMessage>& messages,
     for (size_t i = 0; i < messages.size(); ++i) {
         const auto& msg = messages[i];
         std::string content = trim_whitespace(msg.content);
+        if (options.patches_per_image > 0) {
+            content = expand_image_tags(content, options.patches_per_image, options.image_pad_token);
+        }
 
         if (msg.role == "system") {
             // Already rendered in system prompt block
