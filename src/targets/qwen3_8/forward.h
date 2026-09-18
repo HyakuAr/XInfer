@@ -17,7 +17,21 @@ public:
         : std::runtime_error(msg) {}
 };
 
-// Looks up BF16 token embeddings and writes FP16/FP32 activations
+class vision_format_error : public std::runtime_error {
+public:
+    explicit vision_format_error(const std::string& msg = "vision_format_error")
+        : std::runtime_error(msg) {}
+};
+
+struct VisionInput {
+    const sycl::half* d_vit_embeddings{nullptr}; // [num_patches, hidden_size] USM device buffer
+    size_t num_patches{0};                       // Total patches across all images in prompt
+    size_t num_images{0};                        // Number of images provided
+};
+
+// Looks up BF16 token embeddings and writes FP16/FP32 activations.
+// Supports Zero-Copy Visual Token Injection: if token_id is in reserved visual range,
+// reads directly from ViT output USM buffer without touching host memory.
 // vocab_size: bounds check limit (0 = unbounded, defaults to ModelConfig::kDefaultVocabSize)
 sycl::event embed_tokens_lookup(sycl::queue& q,
                                  sycl::half* out_act,
@@ -25,7 +39,11 @@ sycl::event embed_tokens_lookup(sycl::queue& q,
                                  const int64_t* d_token_ids,
                                  int64_t num_tokens,
                                  int64_t hidden_size,
-                                 int64_t vocab_size = qwen3_8_27b::ModelConfig::kDefaultVocabSize);
+                                 int64_t vocab_size = qwen3_8_27b::ModelConfig::kDefaultVocabSize,
+                                 const sycl::half* d_vit_embeddings = nullptr,
+                                 int64_t visual_token_start = -1,
+                                 int64_t visual_token_end = -1,
+                                 const int64_t* d_visual_indices = nullptr);
 
 sycl::event embed_tokens_lookup(sycl::queue& q,
                                  float* out_act,
@@ -33,7 +51,11 @@ sycl::event embed_tokens_lookup(sycl::queue& q,
                                  const int64_t* d_token_ids,
                                  int64_t num_tokens,
                                  int64_t hidden_size,
-                                 int64_t vocab_size = qwen3_8_27b::ModelConfig::kDefaultVocabSize);
+                                 int64_t vocab_size = qwen3_8_27b::ModelConfig::kDefaultVocabSize,
+                                 const float* d_vit_embeddings = nullptr,
+                                 int64_t visual_token_start = -1,
+                                 int64_t visual_token_end = -1,
+                                 const int64_t* d_visual_indices = nullptr);
 
 // Common activation scratchpad buffers for a single forward layer (FP16 / sycl::half)
 struct LayerActivationBuffers {
@@ -95,7 +117,9 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
                    bool is_graph_capture = false,
                    const LayerActivationBuffers* preallocated_bufs = nullptr,
                    int64_t* preallocated_token_ids = nullptr,
-                   int64_t* preallocated_positions = nullptr);
+                   int64_t* preallocated_positions = nullptr,
+                   const VisionInput* vision_input = nullptr,
+                   const int64_t* d_visual_indices = nullptr);
 
 // Prefills the prompt in chunks (chunk_size tokens each) and returns the first generated token ID
 int64_t prefill_prompt(std::shared_ptr<core::DeviceContext> ctx,
@@ -104,7 +128,8 @@ int64_t prefill_prompt(std::shared_ptr<core::DeviceContext> ctx,
                        core::KVCache& kv_cache,
                        const std::vector<int64_t>& prompt_tokens,
                        size_t chunk_size = 512,
-                       bool is_graph_capture = false);
+                       bool is_graph_capture = false,
+                       const VisionInput* vision_input = nullptr);
 
 // Decodes a single token at the current KV-cache sequence length and returns the next token ID
 int64_t decode_step(std::shared_ptr<core::DeviceContext> ctx,

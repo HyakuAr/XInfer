@@ -134,6 +134,7 @@ add_library(xinfer_ops STATIC
     src/ops/gemm_xmx.cpp
     src/ops/attention.cpp
     src/ops/sampling.cpp
+    src/ops/vit.cpp
 )
 target_include_directories(xinfer_ops PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -291,6 +292,20 @@ target_compile_options(test_speculative_mtp PRIVATE -fsycl)
 target_link_options(test_speculative_mtp PRIVATE -fsycl)
 
 add_test(NAME SpeculativeMTPTest COMMAND test_speculative_mtp)
+
+# Multimodal Vision Pipeline ViT Kernels & Zero-Copy Injection
+add_executable(test_vit_kernels
+    tests/test_vit_kernels.cpp
+)
+target_link_libraries(test_vit_kernels PRIVATE
+    xinfer_targets
+    xinfer_ops
+    xinfer_core
+)
+target_compile_options(test_vit_kernels PRIVATE -fsycl)
+target_link_options(test_vit_kernels PRIVATE -fsycl)
+
+add_test(NAME ViTKernelsTest COMMAND test_vit_kernels)
 
 # Milestone 7: Accelerated Linear (GEMV) & Matrix Strategy (Parity Diagnostics)
 add_executable(query_matrix_caps
