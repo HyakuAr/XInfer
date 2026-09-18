@@ -8,6 +8,7 @@
 #include "core/kv_cache.h"
 #include <chrono>
 #include <iostream>
+#include <iomanip>
 #include <new>
 #include <exception>
 
@@ -39,6 +40,27 @@ public:
         artifact::ArtifactReader reader;
         if (!reader.open(config.artifact_path, error_msg)) {
             return false;
+        }
+
+        // Whole-file CRC-64 checksum validation (Fail-Fast Integrity per docs/artifact-format.md)
+        if (config.validate_checksum) {
+            std::cout << "[xinfer::Engine] Validating whole-file checksum (CRC-64/ECMA-182)..." << std::endl;
+            auto t_crc_start = std::chrono::high_resolution_clock::now();
+            std::string crc_err;
+            if (!reader.validate_checksum(&crc_err)) {
+                std::string msg = "Artifact whole-file checksum validation failed: " + crc_err;
+                std::cerr << "[xinfer::Engine] " << msg << std::endl;
+                if (error_msg) *error_msg = msg;
+                return false;
+            }
+            auto t_crc_end = std::chrono::high_resolution_clock::now();
+            double crc_sec = std::chrono::duration<double>(t_crc_end - t_crc_start).count();
+            double mb_per_sec = (reader.header().total_file_size / (1024.0 * 1024.0)) / (crc_sec > 0 ? crc_sec : 1e-6);
+            std::cout << "[xinfer::Engine] Checksum verified successfully in "
+                      << std::fixed << std::setprecision(2) << crc_sec << " s ("
+                      << mb_per_sec << " MB/s)" << std::endl;
+        } else {
+            std::cout << "[xinfer::Engine] Note: Whole-file checksum validation skipped by configuration." << std::endl;
         }
 
         // 3. Load tokenizer from container artifact

@@ -34,6 +34,7 @@ void print_usage(const char* prog) {
               << "  --chunk-size <int>          Chunk size for chunked prefill (default: 512)\n"
               << "  --max-seq-len <int>         Maximum context length for KV cache (default: 8192)\n"
               << "  --workers <int>             Number of worker threads (1-8, default: 8)\n"
+              << "  --skip-checksum             Skip whole-file CRC-64 checksum validation\n"
               << "  --help, -h                  Show this help message\n"
               << std::endl;
 }
@@ -52,6 +53,7 @@ int main(int argc, char** argv) {
     int chunk_size = 512;
     int max_seq_len = 8192;
     int workers = 8;
+    bool validate_checksum = true;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -73,6 +75,8 @@ int main(int argc, char** argv) {
             max_seq_len = std::stoi(argv[++i]);
         } else if (arg == "--workers" && i + 1 < argc) {
             workers = std::clamp(std::stoi(argv[++i]), 1, 8);
+        } else if (arg == "--skip-checksum" || arg == "--no-checksum") {
+            validate_checksum = false;
         } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             return 0;
@@ -86,7 +90,8 @@ int main(int argc, char** argv) {
               << " Model ID:       " << model_id << "\n"
               << " Host:           " << host << "\n"
               << " Port:           " << port << "\n"
-              << " Max Context:    " << max_seq_len << "\n";
+              << " Max Context:    " << max_seq_len << "\n"
+              << " Checksum:       " << (validate_checksum ? "verify (CRC-64)" : "skipped") << "\n";
     if (!tokenizer_path.empty()) {
         std::cout << " Tokenizer:      " << tokenizer_path << "\n";
     }
@@ -99,6 +104,7 @@ int main(int argc, char** argv) {
     eng_cfg.prefer_b60 = true;
     eng_cfg.prefill_chunk_size = chunk_size;
     eng_cfg.max_seq_len = max_seq_len;
+    eng_cfg.validate_checksum = validate_checksum;
 
     xinfer::Engine engine;
     std::string err;

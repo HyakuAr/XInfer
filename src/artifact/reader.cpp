@@ -2,6 +2,7 @@
 #include "checksum.h"
 #include <cstring>
 #include <algorithm>
+#include <sstream>
 
 namespace xinfer::artifact {
 
@@ -262,34 +263,44 @@ bool ArtifactReader::read_section(const std::string& name, void* dst_buffer, siz
     return true;
 }
 
-bool ArtifactReader::validate_checksum(std::string* error_msg) {
+bool ArtifactReader::validate_checksum(std::string* error_msg, size_t buffer_size) {
     if (!is_open_) {
         if (error_msg) *error_msg = "ArtifactReader is not open.";
         return false;
     }
 
+    if (buffer_size == 0) {
+        buffer_size = 4 * 1024 * 1024;
+    }
+
     uint64_t bytes_to_read = header_.total_file_size - sizeof(FileFooter);
+    file_stream_.clear();
     file_stream_.seekg(0, std::ios::beg);
 
     Crc64 file_crc;
-    std::vector<char> buffer(64 * 1024);
+    std::vector<char> buffer(buffer_size);
 
     while (bytes_to_read > 0) {
-        size_t chunk = static_cast<size_t>(std::min<uint64_t>(bytes_to_read, buffer.size()));
+        size_t chunk = static_cast<size_t>(std::min<uint64_t>(bytes_to_read, static_cast<uint64_t>(buffer.size())));
         file_stream_.read(buffer.data(), static_cast<std::streamsize>(chunk));
         std::streamsize bytes_read = file_stream_.gcount();
         if (bytes_read <= 0) {
             if (error_msg) *error_msg = "Premature EOF while validating file checksum.";
+            file_stream_.clear();
             return false;
         }
         file_crc.update(buffer.data(), static_cast<size_t>(bytes_read));
         bytes_to_read -= static_cast<uint64_t>(bytes_read);
     }
 
+    file_stream_.clear();
+
     if (file_crc.digest() != footer_.file_checksum) {
-        if (error_msg) *error_msg = "File trailing checksum mismatch! (expected: " +
-                                    std::to_string(footer_.file_checksum) +
-                                    ", got: " + std::to_string(file_crc.digest()) + ")";
+        std::ostringstream ss;
+        ss << "File trailing checksum mismatch! (expected: 0x"
+           << std::hex << footer_.file_checksum
+           << ", got: 0x" << file_crc.digest() << std::dec << ")";
+        if (error_msg) *error_msg = ss.str();
         return false;
     }
 

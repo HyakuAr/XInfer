@@ -46,7 +46,7 @@ public:
     bool read_section(const std::string& name, void* dst_buffer, size_t buffer_size, std::string* error_msg = nullptr);
 
     // Validate entire file checksum (CRC-64)
-    bool validate_checksum(std::string* error_msg = nullptr);
+    bool validate_checksum(std::string* error_msg = nullptr, size_t buffer_size = 4 * 1024 * 1024);
 
 private:
     std::string filepath_;

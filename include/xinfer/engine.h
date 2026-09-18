@@ -31,6 +31,7 @@ struct EngineConfig {
     size_t      arena_capacity_bytes{256 * 1024 * 1024}; // 256MB scratchpad arena
     size_t      max_seq_len{8192};       // Maximum sequence length supported by KV cache
     size_t      prefill_chunk_size{512}; // Chunk size for chunked prefill
+    bool        validate_checksum{true}; // Whole-file CRC-64 validation (Fail-Fast Integrity, default true)
 };
 
 // Streaming token callback: returns false to halt generation

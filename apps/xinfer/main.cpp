@@ -17,6 +17,7 @@ void print_usage(const char* prog) {
               << "  --chunk-size <int>          Chunk size for chunked prefill (default: 512)\n"
               << "  --max-seq-len <int>         Maximum context length for KV cache (default: 8192)\n"
               << "  --no-chat-template          Do not apply chat template formatting\n"
+              << "  --skip-checksum             Skip whole-file CRC-64 checksum validation\n"
               << "  --help, -h                  Show this help message\n"
               << std::endl;
 }
@@ -37,6 +38,7 @@ int main(int argc, char** argv) {
     int chunk_size = 512;
     int max_seq_len = 8192;
     bool apply_chat_template = true;
+    bool validate_checksum = true;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -56,6 +58,8 @@ int main(int argc, char** argv) {
             max_seq_len = std::stoi(argv[++i]);
         } else if (arg == "--no-chat-template") {
             apply_chat_template = false;
+        } else if (arg == "--skip-checksum" || arg == "--no-checksum") {
+            validate_checksum = false;
         } else if (arg == "--help" || arg == "-h") {
             print_usage(argv[0]);
             return 0;
@@ -70,7 +74,8 @@ int main(int argc, char** argv) {
               << " Max Tokens:   " << max_new_tokens << "\n"
               << " Chunk Size:   " << chunk_size << "\n"
               << " Max Seq Len:  " << max_seq_len << "\n"
-              << " ChatTemplate: " << (apply_chat_template ? "enabled" : "disabled") << "\n";
+              << " ChatTemplate: " << (apply_chat_template ? "enabled" : "disabled") << "\n"
+              << " Checksum:     " << (validate_checksum ? "verify (CRC-64)" : "skipped") << "\n";
     if (!tokenizer_path.empty()) {
         std::cout << " Tokenizer:    " << tokenizer_path << "\n";
     }
@@ -85,6 +90,7 @@ int main(int argc, char** argv) {
     config.prefer_b60 = true;
     config.max_seq_len = static_cast<size_t>(max_seq_len);
     config.prefill_chunk_size = static_cast<size_t>(chunk_size);
+    config.validate_checksum = validate_checksum;
 
     try {
         std::string error_msg;

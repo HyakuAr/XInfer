@@ -240,6 +240,23 @@ target_link_options(test_chat_template PRIVATE -fsycl)
 
 add_test(NAME ChatTemplateTest COMMAND test_chat_template)
 
+add_executable(test_engine_checksum
+    tests/test_engine_checksum.cpp
+)
+target_include_directories(test_engine_checksum PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(test_engine_checksum PRIVATE
+    xinfer_targets
+    xinfer_runtime
+    xinfer_artifact
+)
+target_compile_options(test_engine_checksum PRIVATE -fsycl)
+target_link_options(test_engine_checksum PRIVATE -fsycl)
+
+add_test(NAME EngineChecksumTest COMMAND test_engine_checksum)
+
 # Milestone 6: KV Cache + Chunked Prefill
 # Sequentially placed after xinfer_core and xinfer_ops dependencies are defined
 add_executable(test_kv_cache
