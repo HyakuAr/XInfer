@@ -56,28 +56,55 @@ struct LayerWeights {
 };
 
 struct ModelConfig {
-    int64_t hidden_size{5120};
-    int64_t intermediate_size{17408};
-    int64_t num_hidden_layers{64};
-    int64_t num_attention_heads{24};
-    int64_t num_key_value_heads{4};
-    int64_t head_dim{256};
-    int64_t vocab_size{248320};
-    float   rms_norm_eps{1e-6f};
-    float   rope_theta{10000000.0f};
-    int64_t rope_dim{64};
-    int     group_size{128};
+    static constexpr int64_t kDefaultHiddenSize = 5120;
+    static constexpr int64_t kDefaultIntermediateSize = 17408;
+    static constexpr int64_t kDefaultNumHiddenLayers = 64;
+    static constexpr int64_t kDefaultNumAttentionHeads = 24;
+    static constexpr int64_t kDefaultNumKeyValueHeads = 4;
+    static constexpr int64_t kDefaultHeadDim = 256;
+    static constexpr int64_t kDefaultVocabSize = 248320;
+    static constexpr float   kDefaultRmsNormEps = 1e-6f;
+    static constexpr float   kDefaultRopeTheta = 10000000.0f;
+    static constexpr int64_t kDefaultRopeDim = 64;
+    static constexpr int     kDefaultGroupSize = 128;
 
     // Linear attention channel dimensions
-    int64_t linear_conv_channels{10240};
-    int64_t linear_conv_kernel_dim{4};
-    int64_t linear_num_v_heads{48};
-    int64_t linear_head_k_dim{128};
-    int64_t linear_head_v_dim{128};
-    int64_t linear_z_dim{6144};
-    int64_t linear_b_dim{48};
-    int64_t linear_a_dim{48};
-    int64_t linear_norm_dim{128};
+    static constexpr int64_t kDefaultLinearConvChannels = 10240;
+    static constexpr int64_t kDefaultLinearConvKernelDim = 4;
+    static constexpr int64_t kDefaultLinearNumVHeads = 48;
+    static constexpr int64_t kDefaultLinearNumKHeads = 16;
+    static constexpr int64_t kDefaultLinearHeadKDim = 128;
+    static constexpr int64_t kDefaultLinearHeadVDim = 128;
+    static constexpr int64_t kDefaultLinearZDim = 6144;
+    static constexpr int64_t kDefaultLinearBDim = 48;
+    static constexpr int64_t kDefaultLinearADim = 48;
+    static constexpr int64_t kDefaultLinearNormDim = 128;
+    static constexpr int64_t kDefaultFullAttentionInterval = 4;
+
+    int64_t hidden_size{kDefaultHiddenSize};
+    int64_t intermediate_size{kDefaultIntermediateSize};
+    int64_t num_hidden_layers{kDefaultNumHiddenLayers};
+    int64_t num_attention_heads{kDefaultNumAttentionHeads};
+    int64_t num_key_value_heads{kDefaultNumKeyValueHeads};
+    int64_t head_dim{kDefaultHeadDim};
+    int64_t vocab_size{kDefaultVocabSize};
+    float   rms_norm_eps{kDefaultRmsNormEps};
+    float   rope_theta{kDefaultRopeTheta};
+    int64_t rope_dim{kDefaultRopeDim};
+    int     group_size{kDefaultGroupSize};
+
+    // Linear attention channel dimensions
+    int64_t linear_conv_channels{kDefaultLinearConvChannels};
+    int64_t linear_conv_kernel_dim{kDefaultLinearConvKernelDim};
+    int64_t linear_num_v_heads{kDefaultLinearNumVHeads};
+    int64_t linear_num_k_heads{kDefaultLinearNumKHeads};
+    int64_t linear_head_k_dim{kDefaultLinearHeadKDim};
+    int64_t linear_head_v_dim{kDefaultLinearHeadVDim};
+    int64_t linear_z_dim{kDefaultLinearZDim};
+    int64_t linear_b_dim{kDefaultLinearBDim};
+    int64_t linear_a_dim{kDefaultLinearADim};
+    int64_t linear_norm_dim{kDefaultLinearNormDim};
+    int64_t full_attention_interval{kDefaultFullAttentionInterval};
 
     int64_t linear_out_dim() const noexcept { return linear_num_v_heads * linear_head_v_dim; } // 6144
 
@@ -102,8 +129,9 @@ struct ModelConfig {
             return count;
         }
         int64_t count = 0;
+        int64_t interval = full_attention_interval > 0 ? full_attention_interval : 4;
         for (int64_t l = 0; l < num_hidden_layers; ++l) {
-            if (l % 4 == 3) count++;
+            if (l % interval == interval - 1) count++;
         }
         return count;
     }
@@ -116,7 +144,8 @@ struct ModelConfig {
         if (l >= 0 && l < static_cast<int64_t>(layer_types.size())) {
             return layer_types[l] == "full_attention";
         }
-        return (l % 4 == 3);
+        int64_t interval = full_attention_interval > 0 ? full_attention_interval : 4;
+        return (l % interval == interval - 1);
     }
 
     core::KVCacheConfig create_kv_cache_config(size_t max_seq_len = 8192) const noexcept {

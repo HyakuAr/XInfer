@@ -235,6 +235,24 @@ def main():
 
     text_cfg = config.get("text_config", config)
 
+    # Determine linear attention dimensions and layer types
+    num_k_heads = int(text_cfg.get("linear_num_key_heads", 16))
+    num_v_heads = int(text_cfg.get("linear_num_value_heads", 48))
+    head_k_dim = int(text_cfg.get("linear_key_head_dim", 128))
+    head_v_dim = int(text_cfg.get("linear_value_head_dim", 128))
+    conv_channels = int(text_cfg.get("linear_conv_channels", (num_k_heads * head_k_dim * 2) + (num_v_heads * head_v_dim)))
+    z_dim = int(text_cfg.get("linear_z_dim", num_v_heads * head_v_dim))
+    conv_kernel_dim = int(text_cfg.get("linear_conv_kernel_dim", 4))
+
+    num_layers = int(text_cfg.get("num_hidden_layers", 64))
+    full_attn_interval = int(text_cfg.get("full_attention_interval", 4))
+    raw_layer_types = text_cfg.get("layer_types", [])
+    if not raw_layer_types:
+        raw_layer_types = [
+            "full_attention" if ((l % full_attn_interval) == (full_attn_interval - 1)) else "linear_attention"
+            for l in range(num_layers)
+        ]
+
     # 2. Build metadata JSON
     metadata = {
         "model_name": "Qwen/Qwen3.8-27B",
@@ -243,7 +261,7 @@ def main():
         "properties": {
             "architectures": str(config.get("architectures", ["Qwen3_5ForConditionalGeneration"])),
             "model_type": str(config.get("model_type", "qwen3_5")),
-            "num_hidden_layers": str(text_cfg.get("num_hidden_layers", 64)),
+            "num_hidden_layers": str(num_layers),
             "hidden_size": str(text_cfg.get("hidden_size", 5120)),
             "intermediate_size": str(text_cfg.get("intermediate_size", 17408)),
             "num_attention_heads": str(text_cfg.get("num_attention_heads", 24)),
@@ -253,8 +271,15 @@ def main():
             "max_position_embeddings": str(text_cfg.get("max_position_embeddings", 262144)),
             "rms_norm_eps": str(text_cfg.get("rms_norm_eps", 1e-6)),
             "rope_theta": str(text_cfg.get("rope_parameters", {}).get("rope_theta", 10000000)),
-            "full_attention_interval": str(text_cfg.get("full_attention_interval", 4)),
-            "layer_types": json.dumps(text_cfg.get("layer_types", [])),
+            "full_attention_interval": str(full_attn_interval),
+            "layer_types": json.dumps(raw_layer_types),
+            "linear_conv_channels": str(conv_channels),
+            "linear_conv_kernel_dim": str(conv_kernel_dim),
+            "linear_num_v_heads": str(num_v_heads),
+            "linear_num_k_heads": str(num_k_heads),
+            "linear_head_k_dim": str(head_k_dim),
+            "linear_head_v_dim": str(head_v_dim),
+            "linear_z_dim": str(z_dim),
         }
     }
     meta_json_bytes = json.dumps(metadata, indent=2).encode("utf-8")

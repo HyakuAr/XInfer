@@ -5,6 +5,8 @@
 #include "ops/attention.h"
 #include "ops/rmsnorm.h"
 #include "targets/qwen3_8/linear_attn.h"
+#include "targets/qwen3_8_27b/weights.h"
+#include "artifact/writer.h"
 
 #include <sycl/sycl.hpp>
 #include <sycl/ext/oneapi/experimental/graph.hpp>
@@ -12,9 +14,107 @@
 #include <vector>
 #include <cassert>
 #include <cmath>
+#include <filesystem>
 
 namespace syclex = sycl::ext::oneapi::experimental;
 using namespace xinfer;
+
+void test_linear_attn_shape_validation(sycl::queue& q) {
+    std::cout << "\nTesting linear attention shape constants and validation..." << std::endl;
+
+    // 1. Verify causal_conv1d_silu rejects invalid num_channels <= 0
+    bool caught_conv = false;
+    try {
+        targets::qwen3_8::causal_conv1d_silu(q, (float*)nullptr, (const float*)nullptr, (const float*)nullptr, 1, nullptr, 0);
+    } catch (const std::invalid_argument& e) {
+        caught_conv = true;
+        std::cout << "  -> PASSED: causal_conv1d_silu threw as expected on num_channels=0: " << e.what() << std::endl;
+    }
+    assert(caught_conv);
+
+    // 2. Verify recurrent_gated_delta_net rejects shape mismatch against ModelConfig
+    bool caught_recurrent = false;
+    try {
+        targets::qwen3_8::recurrent_gated_delta_net(
+            q, (float*)nullptr, (const float*)nullptr, (const float*)nullptr, (const float*)nullptr, (const float*)nullptr,
+            (const float*)nullptr, (const float*)nullptr, (const float*)nullptr, (float*)nullptr, 1, false,
+            32, 16, 128, 128, 10240, 6144 // num_v_heads = 32 instead of 48
+        );
+    } catch (const std::invalid_argument& e) {
+        caught_recurrent = true;
+        std::cout << "  -> PASSED: recurrent_gated_delta_net threw on num_v_heads mismatch: " << e.what() << std::endl;
+    }
+    assert(caught_recurrent);
+}
+
+void test_metadata_validation(std::shared_ptr<core::DeviceContext> ctx) {
+    std::cout << "\nTesting LoadedModel::load_from_artifact metadata validation..." << std::endl;
+
+    const std::string dummy_art = "test_meta_val_dummy.xinfer";
+    if (std::filesystem::exists(dummy_art)) {
+        std::filesystem::remove(dummy_art);
+    }
+
+    // 1. Missing required property (missing "full_attention_interval")
+    {
+        artifact::ArtifactMetadata meta;
+        meta.model_name = "Qwen/Qwen3.8-27B";
+        meta.quant_scheme = "INT4-G128-SYM";
+        meta.tokenizer_type = "qwen3_8_tiktoken";
+        meta.properties["hidden_size"] = "5120";
+        meta.properties["intermediate_size"] = "17408";
+        meta.properties["num_hidden_layers"] = "64";
+        meta.properties["num_attention_heads"] = "24";
+        meta.properties["num_key_value_heads"] = "4";
+        meta.properties["head_dim"] = "256";
+        meta.properties["vocab_size"] = "248320";
+        meta.properties["rms_norm_eps"] = "0.000001";
+        meta.properties["rope_theta"] = "10000000.0";
+        // "full_attention_interval" is intentionally missing
+
+        artifact::ArtifactWriter writer;
+        writer.set_metadata(meta);
+        std::string err;
+        assert(writer.write_to_file(dummy_art, &err));
+
+        artifact::ArtifactReader reader;
+        assert(reader.open(dummy_art, &err));
+
+        std::string load_err;
+        auto model = targets::qwen3_8_27b::LoadedModel::load_from_artifact(ctx, reader, &load_err);
+        assert(model == nullptr);
+        assert(load_err.find("missing required property 'full_attention_interval'") != std::string::npos);
+        std::cout << "  -> PASSED: Successfully caught missing 'full_attention_interval': " << load_err << std::endl;
+        reader.close();
+        std::filesystem::remove(dummy_art);
+    }
+
+    // 2. Missing "hidden_size"
+    {
+        artifact::ArtifactMetadata meta;
+        meta.model_name = "Qwen/Qwen3.8-27B";
+        meta.quant_scheme = "INT4-G128-SYM";
+        meta.tokenizer_type = "qwen3_8_tiktoken";
+        meta.properties["full_attention_interval"] = "4";
+        // "hidden_size" is missing
+
+        artifact::ArtifactWriter writer;
+        writer.set_metadata(meta);
+        std::string err;
+        assert(writer.write_to_file(dummy_art, &err));
+
+        artifact::ArtifactReader reader;
+        assert(reader.open(dummy_art, &err));
+
+        std::string load_err;
+        auto model = targets::qwen3_8_27b::LoadedModel::load_from_artifact(ctx, reader, &load_err);
+        assert(model == nullptr);
+        assert(load_err.find("missing required property 'hidden_size'") != std::string::npos);
+        std::cout << "  -> PASSED: Successfully caught missing 'hidden_size': " << load_err << std::endl;
+        reader.close();
+        std::filesystem::remove(dummy_art);
+    }
+}
 
 void test_causal_conv1d_chunk_boundaries(sycl::queue& q) {
     std::cout << "\nTesting causal_conv1d_silu seq_len=1 and seq_len=2 chunk boundaries..." << std::endl;
@@ -181,6 +281,12 @@ int main() {
 
     // 3. Run chunk-boundary test
     test_causal_conv1d_chunk_boundaries(q);
+
+    // 4. Run linear attention shape validation test
+    test_linear_attn_shape_validation(q);
+
+    // 5. Run metadata validation test
+    test_metadata_validation(ctx);
 
     std::cout << "\n==========================================================" << std::endl;
     std::cout << " ALL M8 DECODE GRAPH & LINEAR ATTN TESTS PASSED ON B60!" << std::endl;

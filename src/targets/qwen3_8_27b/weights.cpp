@@ -14,6 +14,34 @@ inline float bf16_to_fp32(uint16_t b) {
     return f;
 }
 
+std::vector<std::string> parse_layer_types_json(std::string_view json_str) {
+    std::vector<std::string> types;
+    size_t i = 0;
+    while (i < json_str.size() && json_str[i] != '[') i++;
+    if (i >= json_str.size()) return types;
+    i++; // skip '['
+
+    while (i < json_str.size()) {
+        while (i < json_str.size() && (json_str[i] == ' ' || json_str[i] == '\t' || json_str[i] == '\r' || json_str[i] == '\n' || json_str[i] == ',')) {
+            i++;
+        }
+        if (i >= json_str.size() || json_str[i] == ']') break;
+        if (json_str[i] == '"') {
+            i++;
+            size_t start = i;
+            while (i < json_str.size() && json_str[i] != '"') {
+                if (json_str[i] == '\\' && i + 1 < json_str.size()) i += 2;
+                else i++;
+            }
+            types.emplace_back(json_str.substr(start, i - start));
+            if (i < json_str.size()) i++; // skip closing '"'
+        } else {
+            i++;
+        }
+    }
+    return types;
+}
+
 } // anonymous namespace
 
 LoadedModel::LoadedModel(std::shared_ptr<core::DeviceContext> ctx)
@@ -69,6 +97,97 @@ std::unique_ptr<LoadedModel> LoadedModel::load_from_artifact(
 
     auto validate_int_prop = [&](const std::string& key, int64_t expected_val) -> bool {
         auto it = meta.properties.find(key);
+        if (it == meta.properties.end() || it->second.empty()) {
+            std::string msg = "Artifact metadata is missing required property '" + key + "'";
+            std::cerr << "[Error] " << msg << std::endl;
+            if (error_msg) *error_msg = msg;
+            return false;
+        }
+        try {
+            int64_t actual_val = std::stoll(it->second);
+            if (actual_val != expected_val) {
+                std::string msg = "Artifact metadata property mismatch for '" + key + "': expected " +
+                                  std::to_string(expected_val) + ", got " + std::to_string(actual_val);
+                std::cerr << "[Error] " << msg << std::endl;
+                if (error_msg) *error_msg = msg;
+                return false;
+            }
+        } catch (const std::exception& e) {
+            std::string msg = "Artifact metadata property '" + key + "' is malformed: " + e.what();
+            std::cerr << "[Error] " << msg << std::endl;
+            if (error_msg) *error_msg = msg;
+            return false;
+        }
+        return true;
+    };
+
+    auto validate_float_prop = [&](const std::string& key, float expected_val, float tol) -> bool {
+        auto it = meta.properties.find(key);
+        if (it == meta.properties.end() || it->second.empty()) {
+            std::string msg = "Artifact metadata is missing required property '" + key + "'";
+            std::cerr << "[Error] " << msg << std::endl;
+            if (error_msg) *error_msg = msg;
+            return false;
+        }
+        try {
+            float actual_val = std::stof(it->second);
+            if (std::abs(actual_val - expected_val) > tol) {
+                std::string msg = "Artifact metadata property mismatch for '" + key + "': expected " +
+                                  std::to_string(expected_val) + ", got " + std::to_string(actual_val);
+                std::cerr << "[Error] " << msg << std::endl;
+                if (error_msg) *error_msg = msg;
+                return false;
+            }
+        } catch (const std::exception& e) {
+            std::string msg = "Artifact metadata property '" + key + "' is malformed: " + e.what();
+            std::cerr << "[Error] " << msg << std::endl;
+            if (error_msg) *error_msg = msg;
+            return false;
+        }
+        return true;
+    };
+
+    // Read full_attention_interval back from metadata and validate
+    auto it_interval = meta.properties.find("full_attention_interval");
+    if (it_interval == meta.properties.end() || it_interval->second.empty()) {
+        std::string msg = "Artifact metadata is missing required property 'full_attention_interval'";
+        std::cerr << "[Error] " << msg << std::endl;
+        if (error_msg) *error_msg = msg;
+        return nullptr;
+    }
+    int64_t parsed_interval = 0;
+    try {
+        parsed_interval = std::stoll(it_interval->second);
+    } catch (const std::exception& e) {
+        std::string msg = "Artifact metadata property 'full_attention_interval' is malformed: " + std::string(e.what());
+        std::cerr << "[Error] " << msg << std::endl;
+        if (error_msg) *error_msg = msg;
+        return nullptr;
+    }
+    if (parsed_interval <= 0) {
+        std::string msg = "Artifact metadata property 'full_attention_interval' must be positive, got " +
+                          std::to_string(parsed_interval);
+        std::cerr << "[Error] " << msg << std::endl;
+        if (error_msg) *error_msg = msg;
+        return nullptr;
+    }
+    model->config_.full_attention_interval = parsed_interval;
+
+    if (!validate_int_prop("hidden_size", model->config_.hidden_size) ||
+        !validate_int_prop("intermediate_size", model->config_.intermediate_size) ||
+        !validate_int_prop("num_hidden_layers", model->config_.num_hidden_layers) ||
+        !validate_int_prop("num_attention_heads", model->config_.num_attention_heads) ||
+        !validate_int_prop("num_key_value_heads", model->config_.num_key_value_heads) ||
+        !validate_int_prop("head_dim", model->config_.head_dim) ||
+        !validate_int_prop("vocab_size", model->config_.vocab_size) ||
+        !validate_float_prop("rms_norm_eps", model->config_.rms_norm_eps, 1e-7f) ||
+        !validate_float_prop("rope_theta", model->config_.rope_theta, 1.0f) ||
+        !validate_int_prop("full_attention_interval", model->config_.full_attention_interval)) {
+        return nullptr;
+    }
+
+    auto validate_optional_int_prop = [&](const std::string& key, int64_t expected_val) -> bool {
+        auto it = meta.properties.find(key);
         if (it != meta.properties.end() && !it->second.empty()) {
             int64_t actual_val = std::stoll(it->second);
             if (actual_val != expected_val) {
@@ -82,30 +201,13 @@ std::unique_ptr<LoadedModel> LoadedModel::load_from_artifact(
         return true;
     };
 
-    auto validate_float_prop = [&](const std::string& key, float expected_val, float tol) -> bool {
-        auto it = meta.properties.find(key);
-        if (it != meta.properties.end() && !it->second.empty()) {
-            float actual_val = std::stof(it->second);
-            if (std::abs(actual_val - expected_val) > tol) {
-                std::string msg = "Artifact metadata property mismatch for '" + key + "': expected " +
-                                  std::to_string(expected_val) + ", got " + std::to_string(actual_val);
-                std::cerr << "[Error] " << msg << std::endl;
-                if (error_msg) *error_msg = msg;
-                return false;
-            }
-        }
-        return true;
-    };
-
-    if (!validate_int_prop("hidden_size", model->config_.hidden_size) ||
-        !validate_int_prop("intermediate_size", model->config_.intermediate_size) ||
-        !validate_int_prop("num_hidden_layers", model->config_.num_hidden_layers) ||
-        !validate_int_prop("num_attention_heads", model->config_.num_attention_heads) ||
-        !validate_int_prop("num_key_value_heads", model->config_.num_key_value_heads) ||
-        !validate_int_prop("head_dim", model->config_.head_dim) ||
-        !validate_int_prop("vocab_size", model->config_.vocab_size) ||
-        !validate_float_prop("rms_norm_eps", model->config_.rms_norm_eps, 1e-7f) ||
-        !validate_float_prop("rope_theta", model->config_.rope_theta, 1.0f)) {
+    if (!validate_optional_int_prop("linear_conv_channels", model->config_.linear_conv_channels) ||
+        !validate_optional_int_prop("linear_conv_kernel_dim", model->config_.linear_conv_kernel_dim) ||
+        !validate_optional_int_prop("linear_num_v_heads", model->config_.linear_num_v_heads) ||
+        !validate_optional_int_prop("linear_num_k_heads", model->config_.linear_num_k_heads) ||
+        !validate_optional_int_prop("linear_head_k_dim", model->config_.linear_head_k_dim) ||
+        !validate_optional_int_prop("linear_head_v_dim", model->config_.linear_head_v_dim) ||
+        !validate_optional_int_prop("linear_z_dim", model->config_.linear_z_dim)) {
         return nullptr;
     }
 
@@ -266,6 +368,19 @@ std::unique_ptr<LoadedModel> LoadedModel::load_from_artifact(
     model->config_.layer_types.clear();
     model->config_.layer_types.reserve(model->config_.num_hidden_layers);
 
+    auto it_layer_types = meta.properties.find("layer_types");
+    std::vector<std::string> meta_layer_types;
+    if (it_layer_types != meta.properties.end() && !it_layer_types->second.empty()) {
+        meta_layer_types = parse_layer_types_json(it_layer_types->second);
+        if (!meta_layer_types.empty() && meta_layer_types.size() != static_cast<size_t>(model->config_.num_hidden_layers)) {
+            std::string msg = "Artifact metadata 'layer_types' count (" + std::to_string(meta_layer_types.size()) +
+                              ") does not match num_hidden_layers (" + std::to_string(model->config_.num_hidden_layers) + ")";
+            std::cerr << "[Error] " << msg << std::endl;
+            if (error_msg) *error_msg = msg;
+            return nullptr;
+        }
+    }
+
     for (int l = 0; l < model->config_.num_hidden_layers; ++l) {
         LayerWeights& layer = model->layers_[l];
         layer.layer_idx = l;
@@ -313,24 +428,61 @@ std::unique_ptr<LoadedModel> LoadedModel::load_from_artifact(
             return nullptr;
         }
 
-        // Token Mixer: determine layer type directly from artifact sections instead of an arithmetic guess.
+        // Token Mixer: determine layer type directly from artifact sections and metadata.
         // Citing transformers/models/qwen3_5/modeling_qwen3_5.py (Qwen3_5DecoderLayer.__init__, lines 733-739)
-        // and config.json (text_config.layer_types and text_config.full_attention_interval = 4):
+        // and config.json (text_config.layer_types and text_config.full_attention_interval):
         //   self.layer_type = config.layer_types[layer_idx]
         //   if self.layer_type == "linear_attention": self.linear_attn = Qwen3_5GatedDeltaNet(...)
         //   elif self.layer_type == "full_attention": self.self_attn = Qwen3_5Attention(...)
-        // Inspect actual artifact container sections to support non-uniform configurations without guessing.
+        // Inspect actual artifact container sections and cross-check against metadata and full_attention_interval.
         bool has_full_attn = reader.has_section(prefix + ".self_attn.q_proj.weight");
         bool has_linear_attn = reader.has_section(prefix + ".linear_attn.in_proj_qkv.weight");
 
-        if (has_full_attn && !has_linear_attn) {
-            layer.layer_type = "full_attention";
-        } else if (has_linear_attn && !has_full_attn) {
-            layer.layer_type = "linear_attention";
-        } else {
-            // Fallback to config layer_types if pre-configured, or interval formula (l % 4 == 3)
-            layer.layer_type = model->config_.is_full_attention_layer(l) ? "full_attention" : "linear_attention";
+        int64_t interval = model->config_.full_attention_interval;
+        if (interval <= 0) {
+            std::string msg = "Invalid full_attention_interval in model config: " + std::to_string(interval);
+            std::cerr << "[Error] " << msg << std::endl;
+            if (error_msg) *error_msg = msg;
+            return nullptr;
         }
+
+        std::string expected_by_interval = ((l % interval) == (interval - 1)) ? "full_attention" : "linear_attention";
+
+        std::string detected_type;
+        if (has_full_attn && !has_linear_attn) {
+            detected_type = "full_attention";
+        } else if (has_linear_attn && !has_full_attn) {
+            detected_type = "linear_attention";
+        } else {
+            // Fallback to metadata layer_types if present, or interval formula using full_attention_interval
+            if (l < static_cast<int64_t>(meta_layer_types.size())) {
+                detected_type = meta_layer_types[l];
+            } else {
+                detected_type = expected_by_interval;
+            }
+        }
+
+        // Fail-loud cross-check: verify detected layer type against metadata and interval
+        if (l < static_cast<int64_t>(meta_layer_types.size())) {
+            if (detected_type != meta_layer_types[l]) {
+                std::string msg = "Layer " + std::to_string(l) + " type mismatch: section detection gave '" +
+                                  detected_type + "', but metadata specifies '" + meta_layer_types[l] + "'";
+                std::cerr << "[Error] " << msg << std::endl;
+                if (error_msg) *error_msg = msg;
+                return nullptr;
+            }
+        } else {
+            if (detected_type != expected_by_interval) {
+                std::string msg = "Layer " + std::to_string(l) + " type mismatch: section detection gave '" +
+                                  detected_type + "', but full_attention_interval=" + std::to_string(interval) +
+                                  " requires '" + expected_by_interval + "'";
+                std::cerr << "[Error] " << msg << std::endl;
+                if (error_msg) *error_msg = msg;
+                return nullptr;
+            }
+        }
+
+        layer.layer_type = detected_type;
         model->config_.layer_types.push_back(layer.layer_type);
 
         if (layer.layer_type == "full_attention") {

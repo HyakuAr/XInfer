@@ -173,12 +173,15 @@ void forward_layer(sycl::queue& q,
 
         // Stateful Causal Conv1d + SiLU
         causal_conv1d_silu(q, bufs.act_qkv_conv, bufs.act_qkv_raw, layer.d_conv1d_weight, seq_len,
-                           kv_cache.conv_state(linear_idx));
+                           kv_cache.conv_state(linear_idx), cfg.linear_conv_channels);
 
         // Stateful Recurrent Gated Delta Net + RMSNormGated
         recurrent_gated_delta_net(q, bufs.act_delta_out, bufs.act_qkv_conv, bufs.act_z, bufs.act_b, bufs.act_a,
-                                   layer.d_A_log, layer.d_dt_bias, layer.d_norm_weight,
-                                   kv_cache.linear_state(linear_idx), seq_len, zero_linear_state);
+                                  layer.d_A_log, layer.d_dt_bias, layer.d_norm_weight,
+                                  kv_cache.linear_state(linear_idx), seq_len, zero_linear_state,
+                                  cfg.linear_num_v_heads, cfg.linear_num_k_heads,
+                                  cfg.linear_head_k_dim, cfg.linear_head_v_dim,
+                                  cfg.linear_conv_channels, cfg.linear_z_dim);
 
         // Out projection
         ops::linear_int4(q, bufs.act_proj_out, bufs.act_delta_out,

@@ -313,14 +313,17 @@ int main() {
             // Causal Conv1d
             cat_events[CAT_LIN_ATTN_CONV1D].push_back(
                 targets::qwen3_8::causal_conv1d_silu(q, act_qkv_conv, act_qkv_raw, layer.d_conv1d_weight, 1,
-                                                     kv_cache.conv_state(linear_idx))
+                                                     kv_cache.conv_state(linear_idx), cfg.linear_conv_channels)
             );
 
             // Recurrent Gated Delta Net
             cat_events[CAT_LIN_ATTN_RECURRENT].push_back(
                 targets::qwen3_8::recurrent_gated_delta_net(q, act_delta_out, act_qkv_conv, act_z, act_b, act_a,
                                                             layer.d_A_log, layer.d_dt_bias, layer.d_norm_weight,
-                                                            kv_cache.linear_state(linear_idx), 1, false)
+                                                            kv_cache.linear_state(linear_idx), 1, false,
+                                                            cfg.linear_num_v_heads, cfg.linear_num_k_heads,
+                                                            cfg.linear_head_k_dim, cfg.linear_head_v_dim,
+                                                            cfg.linear_conv_channels, cfg.linear_z_dim)
             );
 
             // Out projection

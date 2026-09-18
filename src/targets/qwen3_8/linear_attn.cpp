@@ -8,8 +8,31 @@
 //   sycl::reqd_sub_group_size(16).
 
 #include "linear_attn.h"
+#include <stdexcept>
+#include <string>
 
 namespace xinfer::targets::qwen3_8 {
+
+// Static assertions explicitly tying compiled kernel constants to ModelConfig defaults
+static_assert(qwen3_8_27b::ModelConfig::kDefaultLinearConvChannels == 10240,
+              "ModelConfig::kDefaultLinearConvChannels must equal 10240 for Qwen3.8-27B");
+static_assert(qwen3_8_27b::ModelConfig::kDefaultLinearNumVHeads == 48,
+              "ModelConfig::kDefaultLinearNumVHeads must equal 48 for Qwen3.8-27B");
+static_assert(qwen3_8_27b::ModelConfig::kDefaultLinearNumKHeads == 16,
+              "ModelConfig::kDefaultLinearNumKHeads must equal 16 for Qwen3.8-27B");
+static_assert(qwen3_8_27b::ModelConfig::kDefaultLinearHeadKDim == 128,
+              "ModelConfig::kDefaultLinearHeadKDim must equal 128 for Qwen3.8-27B");
+static_assert(qwen3_8_27b::ModelConfig::kDefaultLinearHeadVDim == 128,
+              "ModelConfig::kDefaultLinearHeadVDim must equal 128 for Qwen3.8-27B");
+static_assert(qwen3_8_27b::ModelConfig::kDefaultLinearZDim == 6144,
+              "ModelConfig::kDefaultLinearZDim must equal 6144 for Qwen3.8-27B");
+static_assert(qwen3_8_27b::ModelConfig::kDefaultLinearConvChannels ==
+              (qwen3_8_27b::ModelConfig::kDefaultLinearNumKHeads * qwen3_8_27b::ModelConfig::kDefaultLinearHeadKDim * 2) +
+              (qwen3_8_27b::ModelConfig::kDefaultLinearNumVHeads * qwen3_8_27b::ModelConfig::kDefaultLinearHeadVDim),
+              "Linear conv channels must equal 2 * key_dim + value_dim");
+static_assert(qwen3_8_27b::ModelConfig::kDefaultLinearZDim ==
+              qwen3_8_27b::ModelConfig::kDefaultLinearNumVHeads * qwen3_8_27b::ModelConfig::kDefaultLinearHeadVDim,
+              "Linear z_dim must equal num_v_heads * head_v_dim");
 
 template <typename InT, typename OutT>
 sycl::event causal_conv1d_silu_impl(sycl::queue& q,
@@ -17,9 +40,13 @@ sycl::event causal_conv1d_silu_impl(sycl::queue& q,
                                     const InT* in_qkv,
                                     const float* conv_w,
                                     int64_t seq_len,
-                                    float* conv_state) {
-    constexpr int64_t num_channels = 10240;
+                                    float* conv_state,
+                                    int64_t num_channels) {
     if (seq_len <= 0) return sycl::event{};
+    if (num_channels <= 0) {
+        throw std::invalid_argument("causal_conv1d_silu: num_channels must be positive, got " +
+                                    std::to_string(num_channels));
+    }
 
     if (seq_len == 1) {
         return q.parallel_for(sycl::range<1>(num_channels), [=](sycl::id<1> idx) {
@@ -62,7 +89,7 @@ sycl::event causal_conv1d_silu_impl(sycl::queue& q,
             if (src_t >= 0) {
                 val = static_cast<float>(in_qkv[src_t * num_channels + c]);
             } else if (conv_state) {
-                // src_t is -1, -2, or -3. conv_state has shape [3, 10240]
+                // src_t is -1, -2, or -3. conv_state has shape [3, num_channels]
                 int64_t state_idx = 3 + src_t;
                 if (state_idx >= 0 && state_idx < 3) {
                     val = conv_state[state_idx * num_channels + c];
@@ -99,8 +126,9 @@ sycl::event causal_conv1d_silu(sycl::queue& q,
                                const sycl::half* in_qkv,
                                const float* conv_w,
                                int64_t seq_len,
-                               float* conv_state) {
-    return causal_conv1d_silu_impl<sycl::half, sycl::half>(q, out_qkv, in_qkv, conv_w, seq_len, conv_state);
+                               float* conv_state,
+                               int64_t num_channels) {
+    return causal_conv1d_silu_impl<sycl::half, sycl::half>(q, out_qkv, in_qkv, conv_w, seq_len, conv_state, num_channels);
 }
 
 sycl::event causal_conv1d_silu(sycl::queue& q,
@@ -108,8 +136,9 @@ sycl::event causal_conv1d_silu(sycl::queue& q,
                                const float* in_qkv,
                                const float* conv_w,
                                int64_t seq_len,
-                               float* conv_state) {
-    return causal_conv1d_silu_impl<float, float>(q, out_qkv, in_qkv, conv_w, seq_len, conv_state);
+                               float* conv_state,
+                               int64_t num_channels) {
+    return causal_conv1d_silu_impl<float, float>(q, out_qkv, in_qkv, conv_w, seq_len, conv_state, num_channels);
 }
 
 template <typename InT, typename OutT>
@@ -124,14 +153,41 @@ sycl::event recurrent_gated_delta_net_impl(sycl::queue& q,
                                            const float* norm_weight,
                                            float* state_buffer,
                                            int64_t seq_len,
-                                           bool zero_state) {
+                                           bool zero_state,
+                                           int64_t num_v_heads,
+                                           int64_t num_k_heads,
+                                           int64_t head_k_dim,
+                                           int64_t head_v_dim,
+                                           int64_t total_channels,
+                                           int64_t value_dim) {
     if (seq_len <= 0) return sycl::event{};
-    constexpr int64_t num_v_heads = 48;
-    constexpr int64_t num_k_heads = 16;
-    constexpr int64_t head_k_dim = 128;
-    constexpr int64_t head_v_dim = 128;
-    constexpr int64_t total_channels = 10240;
-    constexpr int64_t value_dim = 6144;
+
+    // Fail-loud runtime check: verify passed shapes against compiled kernel configuration
+    if (num_v_heads != qwen3_8_27b::ModelConfig::kDefaultLinearNumVHeads ||
+        num_k_heads != qwen3_8_27b::ModelConfig::kDefaultLinearNumKHeads ||
+        head_k_dim != qwen3_8_27b::ModelConfig::kDefaultLinearHeadKDim ||
+        head_v_dim != qwen3_8_27b::ModelConfig::kDefaultLinearHeadVDim ||
+        total_channels != qwen3_8_27b::ModelConfig::kDefaultLinearConvChannels ||
+        value_dim != qwen3_8_27b::ModelConfig::kDefaultLinearZDim) {
+        throw std::invalid_argument(
+            "recurrent_gated_delta_net: runtime model shape mismatch against compiled kernel dimensions. "
+            "Expected (" + std::to_string(qwen3_8_27b::ModelConfig::kDefaultLinearNumVHeads) + " v_heads, " +
+            std::to_string(qwen3_8_27b::ModelConfig::kDefaultLinearNumKHeads) + " k_heads, " +
+            std::to_string(qwen3_8_27b::ModelConfig::kDefaultLinearHeadKDim) + " k_dim, " +
+            std::to_string(qwen3_8_27b::ModelConfig::kDefaultLinearHeadVDim) + " v_dim, " +
+            std::to_string(qwen3_8_27b::ModelConfig::kDefaultLinearConvChannels) + " channels, " +
+            std::to_string(qwen3_8_27b::ModelConfig::kDefaultLinearZDim) + " value_dim), but received (" +
+            std::to_string(num_v_heads) + ", " + std::to_string(num_k_heads) + ", " +
+            std::to_string(head_k_dim) + ", " + std::to_string(head_v_dim) + ", " +
+            std::to_string(total_channels) + ", " + std::to_string(value_dim) + ")");
+    }
+
+    constexpr int64_t k_num_v_heads = qwen3_8_27b::ModelConfig::kDefaultLinearNumVHeads;
+    constexpr int64_t k_num_k_heads = qwen3_8_27b::ModelConfig::kDefaultLinearNumKHeads;
+    constexpr int64_t k_head_k_dim = qwen3_8_27b::ModelConfig::kDefaultLinearHeadKDim;
+    constexpr int64_t k_head_v_dim = qwen3_8_27b::ModelConfig::kDefaultLinearHeadVDim;
+    constexpr int64_t k_total_channels = qwen3_8_27b::ModelConfig::kDefaultLinearConvChannels;
+    constexpr int64_t k_value_dim = qwen3_8_27b::ModelConfig::kDefaultLinearZDim;
 
     return q.submit([&](sycl::handler& cgh) {
         sycl::local_accessor<float, 1> shared_q(sycl::range<1>(128), cgh);
@@ -140,7 +196,7 @@ sycl::event recurrent_gated_delta_net_impl(sycl::queue& q,
         sycl::local_accessor<float, 1> slm_sums(sycl::range<1>(8), cgh); // 8 sub-groups of 16
 
         cgh.parallel_for(
-            sycl::nd_range<2>(sycl::range<2>(num_v_heads, 128), sycl::range<2>(1, 128)),
+            sycl::nd_range<2>(sycl::range<2>(k_num_v_heads, 128), sycl::range<2>(1, 128)),
             [=](sycl::nd_item<2> item) [[sycl::reqd_sub_group_size(16)]] {
                 int64_t h = item.get_group(0);
                 int64_t j = item.get_local_id(1); // 0..127
@@ -155,11 +211,11 @@ sycl::event recurrent_gated_delta_net_impl(sycl::queue& q,
                 // repeat_interleave replicates each Q/K head 3 consecutive times:
                 // K-head 0 serves V-heads 0, 1, 2; K-head 1 serves V-heads 3, 4, 5; K-head h_k serves V-heads 3*h_k..3*h_k+2.
                 // Thus for value head h in [0, 47], the corresponding Q and K head index is exactly h / 3 (in [0, 15]).
-                int64_t h_k = h / 3;
+                int64_t h_k = h / (k_num_v_heads / k_num_k_heads);
                 sycl::sub_group sg = item.get_sub_group();
                 size_t sg_id = sg.get_group_linear_id();
 
-                float* S = state_buffer + h * (head_k_dim * head_v_dim);
+                float* S = state_buffer + h * (k_head_k_dim * k_head_v_dim);
 
                 if (zero_state) {
                     for (int i = 0; i < 128; ++i) {
@@ -172,10 +228,10 @@ sycl::event recurrent_gated_delta_net_impl(sycl::queue& q,
                 float dt_bias_val = dt_bias[h];
 
                 for (int64_t t = 0; t < seq_len; ++t) {
-                    const InT* cur_qkv = qkv + t * total_channels;
-                    const InT* cur_q_in = cur_qkv + (h_k * head_k_dim);
-                    const InT* cur_k_in = cur_qkv + (num_k_heads * head_k_dim) + (h_k * head_k_dim);
-                    const InT* cur_v_in = cur_qkv + (num_k_heads * head_k_dim * 2) + (h * head_v_dim);
+                    const InT* cur_qkv = qkv + t * k_total_channels;
+                    const InT* cur_q_in = cur_qkv + (h_k * k_head_k_dim);
+                    const InT* cur_k_in = cur_qkv + (k_num_k_heads * k_head_k_dim) + (h_k * k_head_k_dim);
+                    const InT* cur_v_in = cur_qkv + (k_num_k_heads * k_head_k_dim * 2) + (h * k_head_v_dim);
 
                     // 1. Cooperative L2 norm of q and k
                     float raw_q = static_cast<float>(cur_q_in[j]);
@@ -227,10 +283,10 @@ sycl::event recurrent_gated_delta_net_impl(sycl::queue& q,
                     item.barrier(sycl::access::fence_space::local_space);
 
                     // 2. Beta and decay g
-                    float b_val = static_cast<float>(b[t * num_v_heads + h]);
+                    float b_val = static_cast<float>(b[t * k_num_v_heads + h]);
                     float beta = 1.0f / (1.0f + sycl::exp(-b_val));
 
-                    float a_val = static_cast<float>(a[t * num_v_heads + h]) + dt_bias_val;
+                    float a_val = static_cast<float>(a[t * k_num_v_heads + h]) + dt_bias_val;
                     float softplus_a = (a_val > 20.0f) ? a_val : sycl::log(1.0f + sycl::exp(a_val));
                     float g = -exp_a_log * softplus_a;
                     float exp_g = sycl::exp(g);
@@ -274,8 +330,8 @@ sycl::event recurrent_gated_delta_net_impl(sycl::queue& q,
                     item.barrier(sycl::access::fence_space::local_space);
 
                     float inv_std = shared_inv_std[0];
-                    const InT* cur_z = z + t * value_dim + h * 128;
-                    OutT* cur_out = out + t * value_dim + h * 128;
+                    const InT* cur_z = z + t * k_value_dim + h * 128;
+                    OutT* cur_out = out + t * k_value_dim + h * 128;
 
                     float normed = attn_j * inv_std * norm_weight[j];
                     float z_val = static_cast<float>(cur_z[j]);
@@ -297,9 +353,16 @@ sycl::event recurrent_gated_delta_net(sycl::queue& q,
                                       const float* norm_weight,
                                       float* state_buffer,
                                       int64_t seq_len,
-                                      bool zero_state) {
+                                      bool zero_state,
+                                      int64_t num_v_heads,
+                                      int64_t num_k_heads,
+                                      int64_t head_k_dim,
+                                      int64_t head_v_dim,
+                                      int64_t total_channels,
+                                      int64_t value_dim) {
     return recurrent_gated_delta_net_impl<sycl::half, sycl::half>(
-        q, out, qkv, z, b, a, A_log, dt_bias, norm_weight, state_buffer, seq_len, zero_state);
+        q, out, qkv, z, b, a, A_log, dt_bias, norm_weight, state_buffer, seq_len, zero_state,
+        num_v_heads, num_k_heads, head_k_dim, head_v_dim, total_channels, value_dim);
 }
 
 sycl::event recurrent_gated_delta_net(sycl::queue& q,
@@ -313,9 +376,16 @@ sycl::event recurrent_gated_delta_net(sycl::queue& q,
                                       const float* norm_weight,
                                       float* state_buffer,
                                       int64_t seq_len,
-                                      bool zero_state) {
+                                      bool zero_state,
+                                      int64_t num_v_heads,
+                                      int64_t num_k_heads,
+                                      int64_t head_k_dim,
+                                      int64_t head_v_dim,
+                                      int64_t total_channels,
+                                      int64_t value_dim) {
     return recurrent_gated_delta_net_impl<float, float>(
-        q, out, qkv, z, b, a, A_log, dt_bias, norm_weight, state_buffer, seq_len, zero_state);
+        q, out, qkv, z, b, a, A_log, dt_bias, norm_weight, state_buffer, seq_len, zero_state,
+        num_v_heads, num_k_heads, head_k_dim, head_v_dim, total_channels, value_dim);
 }
 
 } // namespace xinfer::targets::qwen3_8
