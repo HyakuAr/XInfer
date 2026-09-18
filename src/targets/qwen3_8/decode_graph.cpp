@@ -113,7 +113,7 @@ bool DecodeGraph::capture() {
         graph.begin_recording(q);
 
         // 1. Embedding lookup
-        embed_tokens_lookup(q, bufs_.act_x, model_.d_embed_tokens(), d_token_ids_, 1, hidden_size);
+        embed_tokens_lookup(q, bufs_.act_x, model_.d_embed_tokens(), d_token_ids_, 1, hidden_size, cfg.vocab_size);
 
         // 2. Loop over layers using shared parameterized forward_layer
         const auto& layers = model_.layers();
@@ -145,6 +145,12 @@ bool DecodeGraph::capture() {
 int64_t DecodeGraph::decode_step(int64_t input_token_id, size_t cur_pos) {
     if (!is_captured_ || !exec_graph_) {
         throw std::runtime_error("DecodeGraph::decode_step called before successful graph capture");
+    }
+
+    if (input_token_id < 0 || input_token_id >= model_.config().vocab_size) {
+        std::cerr << "[DecodeGraph] Error: input_token_id (" << input_token_id
+                  << ") out of vocabulary range [0, " << model_.config().vocab_size << ")" << std::endl;
+        return -1;
     }
 
     if (cur_pos >= kv_cache_.max_seq_len()) {

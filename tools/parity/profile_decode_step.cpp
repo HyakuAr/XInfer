@@ -148,7 +148,7 @@ int main() {
     std::cout << "Warming up kernels and memory on B60..." << std::endl;
     // Warmup step to ensure all JIT kernels are compiled and USM buffers are resident
     {
-        targets::qwen3_8::embed_tokens_lookup(q, act_x, model->d_embed_tokens(), d_token_ids, 1, hidden_size);
+        targets::qwen3_8::embed_tokens_lookup(q, act_x, model->d_embed_tokens(), d_token_ids, 1, hidden_size, vocab_size);
         ops::rmsnorm(q, act_normed, act_x, model->layers()[0].d_input_layernorm, 1, hidden_size);
         ops::linear_int4(q, d_logits, act_normed,
                          static_cast<const uint8_t*>(model->lm_head().d_weights_int4),
@@ -198,7 +198,7 @@ int main() {
 
     // 1. Embedding Lookup
     cat_events[CAT_EMBED].push_back(
-        targets::qwen3_8::embed_tokens_lookup(q, act_x, model->d_embed_tokens(), d_token_ids, 1, hidden_size)
+        targets::qwen3_8::embed_tokens_lookup(q, act_x, model->d_embed_tokens(), d_token_ids, 1, hidden_size, vocab_size)
     );
 
     // 2. Layers

@@ -5,6 +5,7 @@
 #include "ops/attention.h"
 #include "ops/rmsnorm.h"
 #include "targets/qwen3_8/linear_attn.h"
+#include "targets/qwen3_8/forward.h"
 #include "targets/qwen3_8_27b/weights.h"
 #include "artifact/writer.h"
 
@@ -114,6 +115,93 @@ void test_metadata_validation(std::shared_ptr<core::DeviceContext> ctx) {
         reader.close();
         std::filesystem::remove(dummy_art);
     }
+}
+
+void test_embed_tokens_lookup_bounds(sycl::queue& q) {
+    std::cout << "\nTesting embed_tokens_lookup bounds checking..." << std::endl;
+
+    constexpr int64_t vocab_size = 8;
+    constexpr int64_t hidden_size = 16;
+    constexpr size_t total_elements = vocab_size * hidden_size;
+
+    // Construct a test BF16 embedding table: table[v, d] has bit pattern for (float)(v * 16 + d)
+    std::vector<uint16_t> h_table(total_elements);
+    for (int64_t v = 0; v < vocab_size; ++v) {
+        for (int64_t d = 0; d < hidden_size; ++d) {
+            float val = static_cast<float>(v * 16 + d);
+            uint32_t bits;
+            __builtin_memcpy(&bits, &val, sizeof(float));
+            h_table[v * hidden_size + d] = static_cast<uint16_t>(bits >> 16);
+        }
+    }
+
+    uint16_t* d_table = sycl::malloc_device<uint16_t>(total_elements, q);
+    q.memcpy(d_table, h_table.data(), total_elements * sizeof(uint16_t)).wait();
+
+    // 4 test tokens:
+    // token 0: valid (v = 2)
+    // token 1: out-of-bounds negative (v = -1)
+    // token 2: valid (v = 5)
+    // token 3: out-of-bounds exceeds vocab_size (v = 12)
+    constexpr int64_t num_tokens = 4;
+    std::vector<int64_t> h_token_ids = {2, -1, 5, 12};
+    int64_t* d_token_ids = sycl::malloc_device<int64_t>(num_tokens, q);
+    q.memcpy(d_token_ids, h_token_ids.data(), num_tokens * sizeof(int64_t)).wait();
+
+    // 1. Test FP32 lookup
+    float* d_out_fp32 = sycl::malloc_device<float>(num_tokens * hidden_size, q);
+    std::vector<float> canary_fp32(num_tokens * hidden_size, -999.0f);
+    q.memcpy(d_out_fp32, canary_fp32.data(), canary_fp32.size() * sizeof(float)).wait();
+
+    targets::qwen3_8::embed_tokens_lookup(q, d_out_fp32, d_table, d_token_ids, num_tokens, hidden_size, vocab_size).wait();
+
+    std::vector<float> h_out_fp32(num_tokens * hidden_size);
+    q.memcpy(h_out_fp32.data(), d_out_fp32, h_out_fp32.size() * sizeof(float)).wait();
+
+    for (int64_t t = 0; t < num_tokens; ++t) {
+        int64_t tok = h_token_ids[t];
+        for (int64_t d = 0; d < hidden_size; ++d) {
+            float actual = h_out_fp32[t * hidden_size + d];
+            if (tok >= 0 && tok < vocab_size) {
+                float expected = static_cast<float>(tok * 16 + d);
+                assert(std::abs(actual - expected) < 1e-3f);
+            } else {
+                // Out of bounds tokens must be zeroed by defensive skip
+                assert(actual == 0.0f);
+            }
+        }
+    }
+    std::cout << "  -> PASSED: FP32 embed_tokens_lookup correctly reads in-bounds and zeroes out-of-bounds tokens" << std::endl;
+
+    // 2. Test FP16 (sycl::half) lookup
+    sycl::half* d_out_fp16 = sycl::malloc_device<sycl::half>(num_tokens * hidden_size, q);
+    std::vector<sycl::half> canary_fp16(num_tokens * hidden_size, static_cast<sycl::half>(-999.0f));
+    q.memcpy(d_out_fp16, canary_fp16.data(), canary_fp16.size() * sizeof(sycl::half)).wait();
+
+    targets::qwen3_8::embed_tokens_lookup(q, d_out_fp16, d_table, d_token_ids, num_tokens, hidden_size, vocab_size).wait();
+
+    std::vector<sycl::half> h_out_fp16(num_tokens * hidden_size);
+    q.memcpy(h_out_fp16.data(), d_out_fp16, h_out_fp16.size() * sizeof(sycl::half)).wait();
+
+    for (int64_t t = 0; t < num_tokens; ++t) {
+        int64_t tok = h_token_ids[t];
+        for (int64_t d = 0; d < hidden_size; ++d) {
+            float actual = static_cast<float>(h_out_fp16[t * hidden_size + d]);
+            if (tok >= 0 && tok < vocab_size) {
+                float expected = static_cast<float>(tok * 16 + d);
+                assert(std::abs(actual - expected) < 1e-1f);
+            } else {
+                // Out of bounds tokens must be zeroed by defensive skip
+                assert(actual == 0.0f);
+            }
+        }
+    }
+    std::cout << "  -> PASSED: FP16 embed_tokens_lookup correctly reads in-bounds and zeroes out-of-bounds tokens" << std::endl;
+
+    sycl::free(d_table, q);
+    sycl::free(d_token_ids, q);
+    sycl::free(d_out_fp32, q);
+    sycl::free(d_out_fp16, q);
 }
 
 void test_causal_conv1d_chunk_boundaries(sycl::queue& q) {
@@ -287,6 +375,9 @@ int main() {
 
     // 5. Run metadata validation test
     test_metadata_validation(ctx);
+
+    // 6. Run embedding lookup bounds checking test
+    test_embed_tokens_lookup_bounds(q);
 
     std::cout << "\n==========================================================" << std::endl;
     std::cout << " ALL M8 DECODE GRAPH & LINEAR ATTN TESTS PASSED ON B60!" << std::endl;

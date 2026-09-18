@@ -9,6 +9,7 @@
 #include <iostream>
 #include <cmath>
 #include <algorithm>
+#include <cassert>
 
 namespace xinfer::targets::qwen3_8 {
 
@@ -18,13 +19,25 @@ sycl::event embed_tokens_lookup_impl(sycl::queue& q,
                                       const void* embed_table_bf16,
                                       const int64_t* d_token_ids,
                                       int64_t num_tokens,
-                                      int64_t hidden_size) {
+                                      int64_t hidden_size,
+                                      int64_t vocab_size = qwen3_8_27b::ModelConfig::kDefaultVocabSize) {
+    if (!out_act || !embed_table_bf16 || !d_token_ids || num_tokens <= 0 || hidden_size <= 0) {
+        return sycl::event{};
+    }
     const uint16_t* table = static_cast<const uint16_t*>(embed_table_bf16);
 
     return q.parallel_for(sycl::range<2>(num_tokens, hidden_size), [=](sycl::id<2> idx) {
         int64_t t = idx[0];
         int64_t d = idx[1];
         int64_t token_id = d_token_ids[t];
+
+#if defined(_DEBUG)
+        assert(token_id >= 0 && (vocab_size <= 0 || token_id < vocab_size));
+#endif
+        if (token_id < 0 || (vocab_size > 0 && token_id >= vocab_size)) {
+            out_act[t * hidden_size + d] = static_cast<OutT>(0);
+            return;
+        }
 
         uint16_t bf16_val = table[token_id * hidden_size + d];
         uint32_t fp32_bits = static_cast<uint32_t>(bf16_val) << 16;
@@ -39,8 +52,9 @@ sycl::event embed_tokens_lookup(sycl::queue& q,
                                  const void* embed_table_bf16,
                                  const int64_t* d_token_ids,
                                  int64_t num_tokens,
-                                 int64_t hidden_size) {
-    return embed_tokens_lookup_impl<sycl::half>(q, out_act, embed_table_bf16, d_token_ids, num_tokens, hidden_size);
+                                 int64_t hidden_size,
+                                 int64_t vocab_size) {
+    return embed_tokens_lookup_impl<sycl::half>(q, out_act, embed_table_bf16, d_token_ids, num_tokens, hidden_size, vocab_size);
 }
 
 sycl::event embed_tokens_lookup(sycl::queue& q,
@@ -48,8 +62,9 @@ sycl::event embed_tokens_lookup(sycl::queue& q,
                                  const void* embed_table_bf16,
                                  const int64_t* d_token_ids,
                                  int64_t num_tokens,
-                                 int64_t hidden_size) {
-    return embed_tokens_lookup_impl<float>(q, out_act, embed_table_bf16, d_token_ids, num_tokens, hidden_size);
+                                 int64_t hidden_size,
+                                 int64_t vocab_size) {
+    return embed_tokens_lookup_impl<float>(q, out_act, embed_table_bf16, d_token_ids, num_tokens, hidden_size, vocab_size);
 }
 
 void forward_layer(sycl::queue& q,
@@ -287,7 +302,7 @@ void forward_chunk(std::shared_ptr<core::DeviceContext> ctx,
     bufs.act_delta_out = static_cast<sycl::half*>(arena.allocate(seq_len * cfg.linear_z_dim * sizeof(sycl::half)));
 
     // 1. Initial embedding lookup
-    embed_tokens_lookup(q, bufs.act_x, model.d_embed_tokens(), d_token_ids, seq_len, hidden_size);
+    embed_tokens_lookup(q, bufs.act_x, model.d_embed_tokens(), d_token_ids, seq_len, hidden_size, cfg.vocab_size);
 
     // 2. Loop over layers using shared parameterized forward_layer
     const auto& layers = model.layers();
@@ -317,11 +332,19 @@ int64_t prefill_prompt(std::shared_ptr<core::DeviceContext> ctx,
                   << ") exceeds KV cache max_seq_len (" << kv_cache.max_seq_len() << ")" << std::endl;
         return -1;
     }
+    const auto& cfg = model.config();
+    for (size_t i = 0; i < prompt_tokens.size(); ++i) {
+        if (prompt_tokens[i] < 0 || prompt_tokens[i] >= cfg.vocab_size) {
+            std::cerr << "[xinfer::qwen3_8] Error: Prompt token at index " << i << " ("
+                      << prompt_tokens[i] << ") out of vocabulary range [0, "
+                      << cfg.vocab_size << ")" << std::endl;
+            return -1;
+        }
+    }
     if (chunk_size == 0) chunk_size = 512;
 
     kv_cache.clear();
 
-    const auto& cfg = model.config();
     float* d_logits = static_cast<float*>(arena.persistent_buffer(cfg.vocab_size * sizeof(float)));
 
     size_t total_tokens = prompt_tokens.size();
@@ -363,6 +386,13 @@ int64_t decode_step(std::shared_ptr<core::DeviceContext> ctx,
     }
 
     const auto& cfg = model.config();
+    if (input_token_id < 0 || input_token_id >= cfg.vocab_size) {
+        std::cerr << "[xinfer::qwen3_8] Error: decode_step called with input_token_id ("
+                  << input_token_id << ") out of vocabulary range [0, "
+                  << cfg.vocab_size << ")" << std::endl;
+        return -1;
+    }
+
     if (!d_logits) {
         d_logits = static_cast<float*>(arena.persistent_buffer(cfg.vocab_size * sizeof(float)));
     }

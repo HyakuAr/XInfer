@@ -10,19 +10,22 @@
 namespace xinfer::targets::qwen3_8 {
 
 // Looks up BF16 token embeddings and writes FP16/FP32 activations
+// vocab_size: bounds check limit (0 = unbounded, defaults to ModelConfig::kDefaultVocabSize)
 sycl::event embed_tokens_lookup(sycl::queue& q,
                                  sycl::half* out_act,
                                  const void* embed_table_bf16,
                                  const int64_t* d_token_ids,
                                  int64_t num_tokens,
-                                 int64_t hidden_size);
+                                 int64_t hidden_size,
+                                 int64_t vocab_size = qwen3_8_27b::ModelConfig::kDefaultVocabSize);
 
 sycl::event embed_tokens_lookup(sycl::queue& q,
                                  float* out_act,
                                  const void* embed_table_bf16,
                                  const int64_t* d_token_ids,
                                  int64_t num_tokens,
-                                 int64_t hidden_size);
+                                 int64_t hidden_size,
+                                 int64_t vocab_size = qwen3_8_27b::ModelConfig::kDefaultVocabSize);
 
 // Common activation scratchpad buffers for a single forward layer (FP16 / sycl::half)
 struct LayerActivationBuffers {
