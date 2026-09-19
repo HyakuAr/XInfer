@@ -47,7 +47,157 @@ sycl::event linear_int4_impl(sycl::queue& q,
     constexpr int64_t ROWS_PER_SG = 2;
 
     int64_t sgs_per_m = (N + ROWS_PER_SG - 1) / ROWS_PER_SG;
-    size_t total_subgroups = static_cast<size_t>(M * sgs_per_m);
+
+    // Split-K auto-selection: if total sub-groups < 10% of B60 HW threads (1280),
+    // parallelize the K dimension to recruit more hardware threads.
+    // Citing docs/vendor/thread-mapping-occupancy.md lines 22-24:
+    //   64 HW threads per Xe-Core, 1280 total. Sub-group = one HW thread.
+    constexpr int64_t HW_THREADS = 1280;
+    constexpr int64_t OCCUPANCY_FLOOR = HW_THREADS / 10; // 128 sub-groups = 10% occupancy
+    size_t base_sgs = static_cast<size_t>(M * sgs_per_m);
+
+    if (base_sgs < static_cast<size_t>(OCCUPANCY_FLOOR) && num_groups >= 4) {
+        // Use split-K path: divide K groups across S splits per output row pair
+        // Target: at least OCCUPANCY_FLOOR total sub-groups
+        int64_t S = (OCCUPANCY_FLOOR + sgs_per_m - 1) / sgs_per_m;
+        // Clamp S to be a divisor-friendly value and not exceed num_groups
+        if (S > num_groups) S = num_groups;
+        // Round S down to a power of 2 for clean division
+        int64_t s_pow2 = 1;
+        while (s_pow2 * 2 <= S) s_pow2 *= 2;
+        S = s_pow2;
+
+        int64_t groups_per_split = num_groups / S;
+        if (groups_per_split <= 0) groups_per_split = 1;
+        S = num_groups / groups_per_split; // Recompute exact S
+
+        // Allocate temporary partial-sum buffer: [S, M, N]
+        size_t partial_count = static_cast<size_t>(S * M * N);
+        float* d_partials = sycl::malloc_device<float>(partial_count, q);
+
+        // Phase 1: Each sub-group computes a partial sum over groups_per_split groups
+        size_t total_subgroups_splitk = static_cast<size_t>(S * M * sgs_per_m);
+        size_t global_threads = total_subgroups_splitk * SG_SIZE;
+        size_t padded_global = ((global_threads + WG_SIZE - 1) / WG_SIZE) * WG_SIZE;
+
+        q.submit([&](sycl::handler& cgh) {
+            cgh.parallel_for(
+                sycl::nd_range<1>(padded_global, WG_SIZE),
+                [=](sycl::nd_item<1> item) [[sycl::reqd_sub_group_size(SG_SIZE)]] {
+                    sycl::sub_group sg = item.get_sub_group();
+                    size_t global_sg_id = item.get_global_linear_id() / SG_SIZE;
+                    if (global_sg_id >= total_subgroups_splitk) return;
+
+                    // Decompose: split_id, m, row_pair
+                    int64_t sgs_per_batch = sgs_per_m;
+                    int64_t flat = static_cast<int64_t>(global_sg_id);
+                    int64_t s = flat / (M * sgs_per_batch);
+                    int64_t rem = flat % (M * sgs_per_batch);
+                    int64_t m = rem / sgs_per_batch;
+                    int64_t sg_idx = rem % sgs_per_batch;
+
+                    int64_t n0 = sg_idx * ROWS_PER_SG;
+                    int64_t n1 = n0 + 1;
+                    size_t lane = sg.get_local_linear_id();
+
+                    const InT* row_x = X + m * K;
+                    const uint8_t* row_w0 = W_int4 + n0 * (K / 2);
+                    const uint8_t* row_w1 = (n1 < N) ? (W_int4 + n1 * (K / 2)) : nullptr;
+                    const sycl::half* scales0 = scales + n0 * num_groups;
+                    const sycl::half* scales1 = (n1 < N) ? (scales + n1 * num_groups) : nullptr;
+
+                    int64_t g_start = s * groups_per_split;
+                    int64_t g_end = g_start + groups_per_split;
+                    if (g_end > num_groups) g_end = num_groups;
+
+                    float lane_acc0 = 0.0f;
+                    float lane_acc1 = 0.0f;
+
+                    for (int64_t g = g_start; g < g_end; ++g) {
+                        int64_t base_k = g * group_size;
+                        int64_t base_byte = base_k / 2;
+                        int64_t k_offset = base_k + lane * 8;
+
+                        float x0 = static_cast<float>(row_x[k_offset + 0]);
+                        float x1 = static_cast<float>(row_x[k_offset + 1]);
+                        float x2 = static_cast<float>(row_x[k_offset + 2]);
+                        float x3 = static_cast<float>(row_x[k_offset + 3]);
+                        float x4 = static_cast<float>(row_x[k_offset + 4]);
+                        float x5 = static_cast<float>(row_x[k_offset + 5]);
+                        float x6 = static_cast<float>(row_x[k_offset + 6]);
+                        float x7 = static_cast<float>(row_x[k_offset + 7]);
+
+                        float scale0 = static_cast<float>(scales0[g]);
+                        const uint32_t* w0_u32 = reinterpret_cast<const uint32_t*>(row_w0 + base_byte);
+                        uint32_t p0 = w0_u32[lane];
+                        int32_t sp0 = static_cast<int32_t>(p0);
+                        float dot0 =
+                            x0 * static_cast<float>((sp0 << 28) >> 28) +
+                            x1 * static_cast<float>((sp0 << 24) >> 28) +
+                            x2 * static_cast<float>((sp0 << 20) >> 28) +
+                            x3 * static_cast<float>((sp0 << 16) >> 28) +
+                            x4 * static_cast<float>((sp0 << 12) >> 28) +
+                            x5 * static_cast<float>((sp0 << 8) >> 28) +
+                            x6 * static_cast<float>((sp0 << 4) >> 28) +
+                            x7 * static_cast<float>(sp0 >> 28);
+                        lane_acc0 += dot0 * scale0;
+
+                        if (row_w1) {
+                            float scale1 = static_cast<float>(scales1[g]);
+                            const uint32_t* w1_u32 = reinterpret_cast<const uint32_t*>(row_w1 + base_byte);
+                            uint32_t p1 = w1_u32[lane];
+                            int32_t sp1 = static_cast<int32_t>(p1);
+                            float dot1 =
+                                x0 * static_cast<float>((sp1 << 28) >> 28) +
+                                x1 * static_cast<float>((sp1 << 24) >> 28) +
+                                x2 * static_cast<float>((sp1 << 20) >> 28) +
+                                x3 * static_cast<float>((sp1 << 16) >> 28) +
+                                x4 * static_cast<float>((sp1 << 12) >> 28) +
+                                x5 * static_cast<float>((sp1 << 8) >> 28) +
+                                x6 * static_cast<float>((sp1 << 4) >> 28) +
+                                x7 * static_cast<float>(sp1 >> 28);
+                            lane_acc1 += dot1 * scale1;
+                        }
+                    }
+
+                    float total0 = sycl::reduce_over_group(sg, lane_acc0, sycl::plus<float>());
+                    if (lane == 0) {
+                        d_partials[s * (M * N) + m * N + n0] = total0;
+                    }
+                    if (row_w1) {
+                        float total1 = sycl::reduce_over_group(sg, lane_acc1, sycl::plus<float>());
+                        if (lane == 0) {
+                            d_partials[s * (M * N) + m * N + n1] = total1;
+                        }
+                    }
+                });
+        });
+
+        // Phase 2: Reduce partials across S splits for each (m, n) output
+        sycl::event reduce_ev = q.submit([&](sycl::handler& cgh) {
+            cgh.parallel_for(
+                sycl::range<1>(static_cast<size_t>(M * N)),
+                [=](sycl::id<1> idx) {
+                    int64_t flat_idx = static_cast<int64_t>(idx[0]);
+                    float acc = 0.0f;
+                    for (int64_t s = 0; s < S; ++s) {
+                        acc += d_partials[s * (M * N) + flat_idx];
+                    }
+                    int64_t m_idx = flat_idx / N;
+                    int64_t n_idx = flat_idx % N;
+                    if (bias) acc += bias[n_idx];
+                    Y[m_idx * N + n_idx] = static_cast<OutT>(acc);
+                });
+        });
+
+        // Free partials after reduction completes
+        reduce_ev.wait();
+        sycl::free(d_partials, q);
+        return reduce_ev;
+    }
+
+    // Standard path (high occupancy)
+    size_t total_subgroups = base_sgs;
     size_t global_threads = total_subgroups * SG_SIZE;
     size_t padded_global = ((global_threads + WG_SIZE - 1) / WG_SIZE) * WG_SIZE;
 
@@ -141,6 +291,7 @@ sycl::event linear_int4_impl(sycl::queue& q,
             });
     });
 }
+
 
 // FP16 in -> FP16 out (Intermediate layer projections)
 sycl::event linear_int4(sycl::queue& q,
