@@ -378,6 +378,85 @@ device execution duration of each kernel during continuous asynchronous executio
 
 ---
 
+## M11 — Reconcile Microbenchmark vs Real Decode Path [~] IN PROGRESS
+
+**Goal:** find out why the *same* memory-bound shape is fast in isolation and
+slow inside the real decode step, fix what can be fixed without touching kernel
+internals of saturated shapes, and prove the fix with profiler numbers.
+
+**Branch:** `perf/reconcile-microbenchmark-vs-real-decode-path`
+
+**Problem Statement:** M10's decode step runs at **1.613 tok/s** with an
+aggregate INT4 GEMV bandwidth of **~28.5 GB/s** against a **383.7 GB/s**
+isolated peak on the exact same hardware. M10 explains this as a
+"shape-mix weighted average," but the MLP SwiGLU path alone (N=17408,
+the single best-occupancy shape) takes **5.41 ms/layer** in decode vs.
+**~0.24 ms** in the M7 tight-loop microbenchmark — a **22x gap** that the
+shape-mix argument cannot explain because N=17408 already has full sub-group
+occupancy.
+
+**Steps:**
+
+1. [x] **Substep 1 — Instrument the actual limiter (not guess at it).**
+   Added `tools/parity/bench_mlp_swiglu_isolation.cpp` with 6 targeted tests:
+   warm tight-loop, warm linear-only baseline, register-pressure comparison
+   (2x sequential linear vs fused SwiGLU), cold-context interleaved pattern,
+   inter-kernel dispatch gap measurement, and sub-group occupancy analysis.
+   Also instrumented `profile_decode_step.cpp` with per-layer MLP SwiGLU
+   event tracking to show timing uniformity vs. spikiness across 64 layers.
+
+2. [x] **Substep 2 — Fix the tiny-N shapes (the part of M10's story that IS correct).**
+   Added split-K auto-selection to `linear_int4_impl`: when total sub-groups
+   fall below 10% of B60's 1280 HW threads (< 128 sub-groups), the K dimension
+   is parallelized across S splits (power-of-2). For N=48 (in_proj_b/a):
+   24 base sub-groups × 4 splits = 96 sub-groups (7.5% vs 1.9% occupancy).
+   Verified against CPU oracle at N=48 shape (tolerance 1e-3 for split-K
+   partial-sum ordering). Added `bench_splitk_shapes.cpp` profiling all 9
+   model projection shapes.
+
+3. [ ] **Substep 3 — Turn the fix into a number, not a feeling.**
+   Re-run `profile_decode_step`, `profile_projections`, and
+   `bench_mlp_swiglu_isolation` before and after Substeps 1–2. Update the
+   per-category table and tok/s number below using the exact same "Verified
+   Build Configuration" format M7/M8/M10 use.
+
+*Pre-Fix Baseline (from M10):*
+| Metric | Value |
+|---|---|
+| Decode step latency | 619.82 ms |
+| Token throughput | 1.613 tok/s |
+| INT4 Linear aggregate BW | ~28.5 GB/s |
+| MLP SwiGLU total (64 layers) | 346.41 ms (56.02% of step) |
+| in_proj_b/a (N=48) occupancy | 1.9% (24 sub-groups) |
+
+*Post-Fix Results (TBD — run `bench_splitk_shapes` and `profile_decode_step` on B60):*
+
+**Verified Build Configuration:** `Release` (`/O3`, Intel oneAPI DPC++/C++ icx 2026.1.0, Level Zero backend).
+
+| Metric | Pre-Fix | Post-Fix | Change |
+|---|---|---|---|
+| Decode step latency | 619.82 ms | **TBD** | |
+| Token throughput | 1.613 tok/s | **TBD** | |
+| INT4 Linear aggregate BW | ~28.5 GB/s | **TBD** | |
+| in_proj_b/a (N=48) BW | **TBD** | **TBD** | |
+| MLP SwiGLU total (64 layers) | 346.41 ms | **TBD** | |
+
+*Diagnostic Tools Added:*
+- `tools/parity/bench_mlp_swiglu_isolation.cpp` — isolates the 22x gap hypothesis
+- `tools/parity/bench_splitk_shapes.cpp` — per-shape split-K bandwidth comparison
+- `profile_decode_step.cpp` — now includes per-layer MLP SwiGLU timing breakdown
+
+**DoD:**
+- [x] Isolation benchmark proves (or disproves) register pressure as the
+      dominant cause of the MLP SwiGLU gap, with device-side profiling data.
+- [x] Split-K kernel implemented for under-occupied shapes, verified against
+      CPU numerical oracle at N=48 specifically.
+- [ ] Decode step re-profiled on B60; new tok/s recorded with profiler run
+      citation. This branch does not close until the recorded number changed
+      and is cited with the profiler run that produced it.
+
+---
+
 ## Later milestones (blocked until M10 is done — not yet detailed)
 
 These follow the project guide's Phase 2/3 but should each get their own
