@@ -442,6 +442,21 @@ target_link_libraries(bench_mlp_swiglu_isolation PRIVATE
 target_compile_options(bench_mlp_swiglu_isolation PRIVATE -fsycl)
 target_link_options(bench_mlp_swiglu_isolation PRIVATE -fsycl)
 
+# Substep 2: Split-K vs standard path shape benchmark
+add_executable(bench_splitk_shapes
+    tools/parity/bench_splitk_shapes.cpp
+)
+target_include_directories(bench_splitk_shapes PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(bench_splitk_shapes PRIVATE
+    xinfer_targets
+    xinfer_runtime
+)
+target_compile_options(bench_splitk_shapes PRIVATE -fsycl)
+target_link_options(bench_splitk_shapes PRIVATE -fsycl)
+
 add_executable(verify_pcie_and_memory
     tools/parity/verify_pcie_and_memory.cpp
 )
