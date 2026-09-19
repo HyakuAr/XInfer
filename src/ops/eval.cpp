@@ -113,7 +113,7 @@ CrossEntropyResult cross_entropy_loss(
                 }
 
                 // ---- Pass 1: Row-max for numerical stability ----
-                float thread_max = -sycl::ext::oneapi::experimental::infinity<float>();
+                float thread_max = -std::numeric_limits<float>::infinity();
                 for (int64_t v = static_cast<int64_t>(local_id); v < v_size;
                      v += static_cast<int64_t>(VOCAB_WG_SIZE)) {
                     float val = row[v];
