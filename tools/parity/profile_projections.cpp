@@ -55,6 +55,9 @@ int main(int argc, char** argv) {
     }
 
     if (reader.metadata().properties.find("full_attention_interval") == reader.metadata().properties.end()) {
+        std::cerr << "[Warning] Artifact metadata missing required property 'full_attention_interval' "
+                  << "(detected pre-M10 legacy artifact). Injecting compatibility fallback: full_attention_interval=4."
+                  << std::endl;
         reader.mutable_metadata().properties["full_attention_interval"] = "4";
     }
 
