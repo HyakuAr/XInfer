@@ -381,6 +381,90 @@ void test_linear_oracle(DeviceContext& ctx) {
     ctx.free_device(d_scales);
     ctx.free_device(d_Y);
 
+    // -------------------------------------------------------------------------
+    // Small-N test (N=48): exercises the split-K path for under-occupied shapes
+    // N=48 with ROWS_PER_SG=2 yields 24 sub-groups = 1.9% of B60's 1280 HW threads,
+    // well below the 10% occupancy floor that triggers split-K auto-selection.
+    // -------------------------------------------------------------------------
+    std::cout << "  Testing linear_int4 at small-N=48 (split-K path, K=5120)..." << std::endl;
+    {
+        const int64_t sM = 1, sK = 5120, sN = 48;
+        const int s_group_size = 128;
+        const int64_t s_num_groups = sK / s_group_size;
+
+        std::vector<float> h_sX(sM * sK);
+        for (auto& v : h_sX) v = dist(rng);
+
+        std::vector<uint8_t> h_sW(sN * (sK / 2));
+        std::vector<sycl::half> h_sScales(sN * s_num_groups);
+
+        for (size_t i = 0; i < h_sScales.size(); ++i) {
+            h_sScales[i] = sycl::half(0.015f + static_cast<float>(i % 10) * 0.001f);
+        }
+        for (size_t i = 0; i < h_sW.size(); ++i) {
+            uint8_t low = (i + 5) & 0x0F;
+            uint8_t high = ((i + 11) & 0x0F) << 4;
+            h_sW[i] = low | high;
+        }
+
+        // CPU Oracle
+        std::vector<float> oracle_sY(sM * sN, 0.0f);
+        for (int64_t m = 0; m < sM; ++m) {
+            for (int64_t n = 0; n < sN; ++n) {
+                double acc = 0.0;
+                const float* rx = h_sX.data() + m * sK;
+                const uint8_t* rw = h_sW.data() + n * (sK / 2);
+                const sycl::half* rs = h_sScales.data() + n * s_num_groups;
+
+                for (int64_t g = 0; g < s_num_groups; ++g) {
+                    float scale = static_cast<float>(rs[g]);
+                    int64_t base_k = g * s_group_size;
+                    int64_t base_byte = base_k / 2;
+
+                    for (int64_t b = 0; b < s_group_size / 2; ++b) {
+                        uint8_t byte_val = rw[base_byte + b];
+                        int8_t low_v = static_cast<int8_t>(byte_val & 0x0F);
+                        if (low_v >= 8) low_v = static_cast<int8_t>(low_v - 16);
+                        int8_t high_v = static_cast<int8_t>((byte_val >> 4) & 0x0F);
+                        if (high_v >= 8) high_v = static_cast<int8_t>(high_v - 16);
+
+                        int64_t k0 = base_k + 2 * b;
+                        int64_t k1 = k0 + 1;
+                        acc += static_cast<double>(rx[k0]) * (static_cast<double>(low_v) * static_cast<double>(scale));
+                        acc += static_cast<double>(rx[k1]) * (static_cast<double>(high_v) * static_cast<double>(scale));
+                    }
+                }
+                oracle_sY[m * sN + n] = static_cast<float>(acc);
+            }
+        }
+
+        // GPU execution
+        float* d_sX = static_cast<float*>(ctx.allocate_device(sM * sK * sizeof(float)));
+        uint8_t* d_sW = static_cast<uint8_t*>(ctx.allocate_device(sN * (sK / 2)));
+        sycl::half* d_sScales = static_cast<sycl::half*>(ctx.allocate_device(sN * s_num_groups * sizeof(sycl::half)));
+        float* d_sY = static_cast<float*>(ctx.allocate_device(sM * sN * sizeof(float)));
+
+        ctx.copy_host_to_device(d_sX, h_sX.data(), sM * sK * sizeof(float));
+        ctx.copy_host_to_device(d_sW, h_sW.data(), sN * (sK / 2));
+        ctx.copy_host_to_device(d_sScales, h_sScales.data(), sN * s_num_groups * sizeof(sycl::half));
+
+        linear_int4(ctx.queue(), d_sY, d_sX, d_sW, d_sScales, nullptr, sM, sN, sK, s_group_size);
+
+        std::vector<float> gpu_sY(sM * sN);
+        ctx.copy_device_to_host(gpu_sY.data(), d_sY, sM * sN * sizeof(float));
+
+        DiffStats diff_small = compare_buffers(oracle_sY.data(), gpu_sY.data(), sM * sN);
+        std::cout << "    Small-N=48 (split-K) Max Abs Diff: " << diff_small.max_abs
+                  << " | Mean Abs: " << diff_small.mean_abs << std::endl;
+        assert(diff_small.max_abs <= 1e-3f); // Slightly relaxed for split-K partial-sum accumulation
+        std::cout << "  -> PASSED: Small-N=48 split-K linear_int4 matches numerical oracle." << std::endl;
+
+        ctx.free_device(d_sX);
+        ctx.free_device(d_sW);
+        ctx.free_device(d_sScales);
+        ctx.free_device(d_sY);
+    }
+
     // Test XMX Systolic GEMM (M = 16, K = 32, N = 64)
     std::cout << "  Testing XMX Systolic GEMM (M = 16, K = 32, N = 64)..." << std::endl;
     const int64_t gM = 16, gK = 32, gN = 64;

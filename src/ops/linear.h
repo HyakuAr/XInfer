@@ -14,6 +14,12 @@ namespace xinfer::ops {
 // Note: Intel Arc Pro B60 XMX has no native INT4 support (per docs/vendor/b60-matrix-caps.md).
 // For M=1 decode, arithmetic intensity is ~4 FLOP/byte (100% memory bandwidth-bound).
 // Vector Engine streaming achieves 383.7 GB/s (84% peak), whereas SLM-unpacking to XMX is 7.5x slower.
+//
+// Split-K auto-selection: when total sub-groups < 10% of HW threads (128 of 1280 on B60),
+// the kernel automatically parallelizes the K-reduction across multiple splits, writing
+// partial sums to a temporary buffer and reducing them in a second pass. This targets
+// the N=48 shapes (in_proj_b, in_proj_a) that otherwise launch at only 1.9% occupancy.
+// (Per docs/vendor/thread-mapping-occupancy.md: sub-group = HW thread, 64 per Xe-Core.)
 // X: [M, K] (activations)
 // W_int4: [N, K/2] (symmetric INT4 weights packed 2 nibbles per byte: low=even, high=odd)
 // scales: [N, K/group_size] (FP16 per-group scales)

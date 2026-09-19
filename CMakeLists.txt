@@ -427,6 +427,36 @@ target_link_libraries(profile_projections PRIVATE
 target_compile_options(profile_projections PRIVATE -fsycl)
 target_link_options(profile_projections PRIVATE -fsycl)
 
+# Substep 1: MLP SwiGLU isolation vs cold-context diagnostic benchmark
+add_executable(bench_mlp_swiglu_isolation
+    tools/parity/bench_mlp_swiglu_isolation.cpp
+)
+target_include_directories(bench_mlp_swiglu_isolation PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(bench_mlp_swiglu_isolation PRIVATE
+    xinfer_targets
+    xinfer_runtime
+)
+target_compile_options(bench_mlp_swiglu_isolation PRIVATE -fsycl)
+target_link_options(bench_mlp_swiglu_isolation PRIVATE -fsycl)
+
+# Substep 2: Split-K vs standard path shape benchmark
+add_executable(bench_splitk_shapes
+    tools/parity/bench_splitk_shapes.cpp
+)
+target_include_directories(bench_splitk_shapes PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(bench_splitk_shapes PRIVATE
+    xinfer_targets
+    xinfer_runtime
+)
+target_compile_options(bench_splitk_shapes PRIVATE -fsycl)
+target_link_options(bench_splitk_shapes PRIVATE -fsycl)
+
 add_executable(verify_pcie_and_memory
     tools/parity/verify_pcie_and_memory.cpp
 )
