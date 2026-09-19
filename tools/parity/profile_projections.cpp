@@ -54,6 +54,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    if (reader.metadata().properties.find("full_attention_interval") == reader.metadata().properties.end()) {
+        reader.mutable_metadata().properties["full_attention_interval"] = "4";
+    }
+
     std::string err;
     auto model = targets::qwen3_8_27b::LoadedModel::load_from_artifact(ctx, reader, &err);
     if (!model) {

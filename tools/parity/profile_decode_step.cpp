@@ -76,7 +76,7 @@ struct OpCategoryTimers {
     }
 };
 
-int main() {
+int main(int argc, char** argv) {
     std::cout << "==================================================================" << std::endl;
     std::cout << " xinfer M10 Performance Diagnostic: Detailed Decode Step Profiler" << std::endl;
 #ifdef XINFER_BUILD_CONFIG
@@ -86,14 +86,17 @@ int main() {
 
     auto ctx = core::DeviceContext::create(true);
     sycl::queue& q = ctx->queue();
-    auto dev = q.get_device();
 
-    std::string artifact_path = "out/qwen3_8_27b.xinfer";
+    std::string artifact_path = (argc > 1) ? argv[1] : "out/qwen3_8_27b.xinfer";
     std::cout << "Loading model artifact: " << artifact_path << " ..." << std::endl;
     artifact::ArtifactReader reader;
     if (!reader.open(artifact_path)) {
         std::cerr << "Failed to open artifact: " << artifact_path << std::endl;
         return 1;
+    }
+
+    if (reader.metadata().properties.find("full_attention_interval") == reader.metadata().properties.end()) {
+        reader.mutable_metadata().properties["full_attention_interval"] = "4";
     }
 
     std::string err;

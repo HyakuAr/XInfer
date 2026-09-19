@@ -31,17 +31,18 @@ struct ShapeSpec {
 };
 
 int main() {
-    std::cout << "==================================================================" << std::endl;
-    std::cout << " Substep 2 Verification: Split-K vs Standard Path Bandwidth" << std::endl;
+    try {
+        std::cout << "==================================================================" << std::endl;
+        std::cout << " Substep 2 Verification: Split-K vs Standard Path Bandwidth" << std::endl;
 #ifdef XINFER_BUILD_CONFIG
-    std::cout << " Build Config: " << XINFER_BUILD_CONFIG << std::endl;
+        std::cout << " Build Config: " << XINFER_BUILD_CONFIG << std::endl;
 #endif
-    std::cout << "==================================================================" << std::endl;
+        std::cout << "==================================================================" << std::endl;
 
-    auto ctx = core::DeviceContext::create(true);
-    sycl::queue& q = ctx->queue();
+        auto ctx = core::DeviceContext::create(true);
+        sycl::queue& q = ctx->queue();
 
-    std::cout << "Device: " << q.get_device().get_info<sycl::info::device::name>() << std::endl;
+        std::cout << "Device: " << q.get_device().get_info<sycl::info::device::name>() << std::endl;
 
     // All shapes from the model's linear projections
     const std::vector<ShapeSpec> shapes = {
@@ -60,18 +61,22 @@ int main() {
     constexpr int64_t M = 1;
     constexpr int GROUP_SIZE = 128;
 
-    // Find max dimensions for allocation
+    // Find max dimensions and buffer requirements across actual shapes
     int64_t max_N = 0, max_K = 0;
+    size_t max_w_bytes = 0;
+    size_t max_s_count = 0;
     for (const auto& s : shapes) {
         if (s.N > max_N) max_N = s.N;
         if (s.K > max_K) max_K = s.K;
+        size_t wb = static_cast<size_t>(s.N) * (s.K / 2);
+        size_t sc = static_cast<size_t>(s.N) * (s.K / GROUP_SIZE);
+        if (wb > max_w_bytes) max_w_bytes = wb;
+        if (sc > max_s_count) max_s_count = sc;
     }
 
     // Allocate buffers
     float*      d_X = sycl::malloc_device<float>(max_K, q);
     float*      d_Y = sycl::malloc_device<float>(max_N, q);
-    size_t max_w_bytes = static_cast<size_t>(max_N) * (max_K / 2);
-    size_t max_s_count = static_cast<size_t>(max_N) * (max_K / GROUP_SIZE);
     uint8_t*    d_W = sycl::malloc_device<uint8_t>(max_w_bytes, q);
     sycl::half* d_S = sycl::malloc_device<sycl::half>(max_s_count, q);
 
@@ -150,4 +155,11 @@ int main() {
     sycl::free(d_S, q);
 
     return 0;
+    } catch (const sycl::exception& e) {
+        std::cerr << "SYCL Exception: " << e.what() << " (code: " << e.code() << ")" << std::endl;
+        return 1;
+    } catch (const std::exception& e) {
+        std::cerr << "Standard Exception: " << e.what() << std::endl;
+        return 1;
+    }
 }

@@ -32,6 +32,7 @@ public:
 
     // Metadata access
     const ArtifactMetadata& metadata() const { return metadata_; }
+    ArtifactMetadata& mutable_metadata() { return metadata_; }
     const std::string& raw_metadata_json() const { return raw_metadata_json_; }
 
     // Section inspection
