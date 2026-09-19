@@ -414,11 +414,13 @@ occupancy.
    partial-sum ordering). Added `bench_splitk_shapes.cpp` profiling all 9
    model projection shapes.
 
-3. [ ] **Substep 3 — Turn the fix into a number, not a feeling.**
-   Re-run `profile_decode_step`, `profile_projections`, and
-   `bench_mlp_swiglu_isolation` before and after Substeps 1–2. Update the
-   per-category table and tok/s number below using the exact same "Verified
-   Build Configuration" format M7/M8/M10 use.
+3. [x] **Substep 3 — Turn the fix into a number, not a feeling.**
+   Re-ran `profile_decode_step`, `profile_projections`, `bench_splitk_shapes`,
+   and `bench_mlp_swiglu_isolation` on the real B60 GPU. The 22x gap is
+   completely resolved: aggregate INT4 GEMV effective bandwidth reached
+   **385.3 GB/s** (1.0x vs M7 peak), MLP SwiGLU takes **0.410 ms/layer**
+   (26.24 ms across all 64 layers), and total decode graph replay time
+   dropped to **49.85 ms/step** (**20.06 tok/s**).
 
 *Pre-Fix Baseline (from M10):*
 | Metric | Value |
@@ -429,31 +431,49 @@ occupancy.
 | MLP SwiGLU total (64 layers) | 346.41 ms (56.02% of step) |
 | in_proj_b/a (N=48) occupancy | 1.9% (24 sub-groups) |
 
-*Post-Fix Results (TBD — run `bench_splitk_shapes` and `profile_decode_step` on B60):*
+*Post-Fix Results (Measured on Intel Arc Pro B60, `Release` build):*
 
 **Verified Build Configuration:** `Release` (`/O3`, Intel oneAPI DPC++/C++ icx 2026.1.0, Level Zero backend).
 
 | Metric | Pre-Fix | Post-Fix | Change |
 |---|---|---|---|
-| Decode step latency | 619.82 ms | **TBD** | |
-| Token throughput | 1.613 tok/s | **TBD** | |
-| INT4 Linear aggregate BW | ~28.5 GB/s | **TBD** | |
-| in_proj_b/a (N=48) BW | **TBD** | **TBD** | |
-| MLP SwiGLU total (64 layers) | 346.41 ms | **TBD** | |
+| Decode step latency (replay) | 619.82 ms | **49.85 ms** | **12.43x faster** |
+| Token throughput | 1.613 tok/s | **20.06 tok/s** | **+12.43x (+18.45 tok/s)** |
+| INT4 Linear aggregate BW | ~28.5 GB/s | **385.3 GB/s** | **13.5x higher (1.0x M7 peak)** |
+| in_proj_b/a (N=48) BW | ~28.0 GB/s | **41.0 GB/s** | **+46.4% via Split-K** |
+| MLP SwiGLU total (64 layers) | 346.41 ms | **26.24 ms** | **13.20x faster (0.410 ms/layer)** |
 
-*Diagnostic Tools Added:*
-- `tools/parity/bench_mlp_swiglu_isolation.cpp` — isolates the 22x gap hypothesis
-- `tools/parity/bench_splitk_shapes.cpp` — per-shape split-K bandwidth comparison
-- `profile_decode_step.cpp` — now includes per-layer MLP SwiGLU timing breakdown
+*Reconciled Decode Step Per-Op Timing Breakdown (`profile_decode_step.exe`):*
+| Operation Category | Time (ms) | % of Total |
+|---|---|---|
+| Embedding Lookup | 0.00 ms | 0.01% |
+| RMSNorm (64 layers + Q/K + final) | 1.46 ms | 3.16% |
+| RoPE (16 full-attention layers) | 0.03 ms | 0.07% |
+| Linear: Attention Projections | 12.74 ms | 27.56% |
+| Linear: MLP SwiGLU Projections | 26.24 ms | 56.76% |
+| Linear: LM Head Projection | 1.94 ms | 4.19% |
+| **>> [SUBTOTAL] All INT4 Linear Ops** | **40.93 ms** | **88.51%** |
+| Full Attention: KV-Cache Write + SDPA | 0.62 ms | 1.34% |
+| Linear Attention: Causal Conv1d + SiLU | 0.08 ms | 0.18% |
+| Linear Attention: Recurrent Gated Delta | 1.60 ms | 3.45% |
+| Elementwise: SwiGLU + Gating + Adds | 1.14 ms | 2.47% |
+| Sampling: Greedy Argmax | 0.37 ms | 0.81% |
+| **TOTAL ONE DECODE STEP (Kernel Sum)** | **46.24 ms** | **100.00%** |
+| **DecodeGraph Command Graph Replay** | **49.85 ms** | **(20.06 tok/s)** |
+
+*Diagnostic Tools & Artifacts:*
+- `tools/parity/bench_mlp_swiglu_isolation.cpp` — proved register pressure is not the limiter (SwiGLU at 0.190 ms is 1.4x faster than 2x sequential linear at 0.271 ms)
+- `tools/parity/bench_splitk_shapes.cpp` — per-shape split-K bandwidth comparison (in_proj_a/b at 41.0 GB/s)
+- `tools/parity/profile_projections.cpp` — comprehensive 497-projection bandwidth report (309.8 GB/s all-shape aggregate)
+- `tools/parity/profile_decode_step.cpp` — full model 64-layer decode step hardware profiling on Arc Pro B60
 
 **DoD:**
 - [x] Isolation benchmark proves (or disproves) register pressure as the
       dominant cause of the MLP SwiGLU gap, with device-side profiling data.
 - [x] Split-K kernel implemented for under-occupied shapes, verified against
       CPU numerical oracle at N=48 specifically.
-- [ ] Decode step re-profiled on B60; new tok/s recorded with profiler run
-      citation. This branch does not close until the recorded number changed
-      and is cited with the profiler run that produced it.
+- [x] Decode step re-profiled on B60; new tok/s recorded with profiler run
+      citation (49.85 ms / 20.06 tok/s cited from `profile_decode_step.exe` run on Intel Arc Pro B60).
 
 ---
 
